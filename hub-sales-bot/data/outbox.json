@@ -1,0 +1,232 @@
+[
+  {
+    "id": "01K5187CV5ZP1R87TKXQK7B8GQ",
+    "t": "amo.lead",
+    "payload": {
+      "lead_uid": "01K5184BRDJJ052RJKHE8ED576",
+      "created_at": "2025-09-13T09:59:11.459Z",
+      "flow": "salon",
+      "source": {
+        "start_param": "organic",
+        "utm": {
+          "source": "",
+          "medium": "",
+          "campaign": "",
+          "content": ""
+        }
+      },
+      "contact": {
+        "phone_e164": "+79803202170",
+        "tg_username": "EDM0ND_DANTESS",
+        "name": "Илья Нехорошев"
+      },
+      "geo": {
+        "city": "Москва",
+        "delivery_city": null
+      },
+      "budget": {
+        "min": 3000000,
+        "max": 5000000,
+        "currency": "RUB"
+      },
+      "prefs": {
+        "country": null,
+        "body": "седан",
+        "fuel": "гибрид",
+        "transmission": null,
+        "drive": null
+      },
+      "consent": {
+        "accepted": true,
+        "version": "2025-09-01",
+        "ts": "2025-09-13T09:59:11.459Z"
+      }
+    },
+    "responsible_id": 1111111,
+    "attempts": 6,
+    "next_at": 1757949529440
+  },
+  {
+    "id": "01K518C2QC347YYBWKVM4HBGEV",
+    "t": "amo.lead",
+    "payload": {
+      "lead_uid": "01K5184BRDJJ052RJKHE8ED576",
+      "created_at": "2025-09-13T10:01:44.939Z",
+      "flow": "import",
+      "source": {
+        "start_param": "organic",
+        "utm": {
+          "source": "",
+          "medium": "",
+          "campaign": "",
+          "content": ""
+        }
+      },
+      "contact": {
+        "phone_e164": "+79803202170",
+        "tg_username": "EDM0ND_DANTESS",
+        "name": "Илья Нехорошев"
+      },
+      "geo": {
+        "city": "Москва",
+        "delivery_city": "Москва"
+      },
+      "budget": {
+        "min": 5000000,
+        "max": null,
+        "currency": "RUB"
+      },
+      "prefs": {
+        "country": "US",
+        "body": "седан",
+        "fuel": "гибрид",
+        "transmission": null,
+        "drive": "FWD"
+      },
+      "consent": {
+        "accepted": true,
+        "version": "2025-09-01",
+        "ts": "2025-09-13T10:01:44.939Z"
+      }
+    },
+    "responsible_id": 2222222,
+    "attempts": 6,
+    "next_at": 1757949529530
+  },
+  {
+    "id": "01K518G20MVX90NHSN687MV8NC",
+    "t": "amo.lead",
+    "payload": {
+      "lead_uid": "01K5184BRDJJ052RJKHE8ED576",
+      "created_at": "2025-09-13T10:03:55.283Z",
+      "flow": "import",
+      "source": {
+        "start_param": "organic",
+        "utm": {
+          "source": "",
+          "medium": "",
+          "campaign": "",
+          "content": ""
+        }
+      },
+      "contact": {
+        "phone_e164": "+79803202170",
+        "tg_username": "EDM0ND_DANTESS",
+        "name": "Илья Нехорошев"
+      },
+      "geo": {
+        "city": "Москва",
+        "delivery_city": "Санкт-Петербург"
+      },
+      "budget": {
+        "min": 5000000,
+        "max": null,
+        "currency": "RUB"
+      },
+      "prefs": {
+        "country": "EU",
+        "body": "седан",
+        "fuel": null,
+        "transmission": null,
+        "drive": "AWD"
+      },
+      "consent": {
+        "accepted": true,
+        "version": "2025-09-01",
+        "ts": "2025-09-13T10:03:55.283Z"
+      }
+    },
+    "responsible_id": 3333333,
+    "attempts": 6,
+    "next_at": 1757949529614
+  },
+  {
+    "id": "01K5190E4YVPYY9M63C2YGRTN6",
+    "t": "amo.lead",
+    "payload": {
+      "lead_uid": "01K5190E4TBWXJFVM0CQX3P3ZX",
+      "created_at": "2025-09-13T10:12:51.996Z",
+      "flow": "salon",
+      "source": {
+        "start_param": "organic",
+        "utm": {}
+      },
+      "contact": {
+        "phone_e164": "+79803202170",
+        "tg_username": "EDM0ND_DANTESS",
+        "name": "Илья Нехорошев"
+      },
+      "geo": {
+        "city": "Москва",
+        "delivery_city": null
+      },
+      "budget": {
+        "min": 3000000,
+        "max": 5000000,
+        "currency": "RUB"
+      },
+      "prefs": {
+        "country": null,
+        "body": null,
+        "fuel": "гибрид",
+        "transmission": null,
+        "drive": null
+      },
+      "consent": {
+        "accepted": true,
+        "version": "2025-09-01",
+        "ts": "2025-09-13T10:12:51.997Z"
+      }
+    },
+    "responsible_id": 1111111,
+    "attempts": 6,
+    "next_at": 1757949529674
+  },
+  {
+    "id": "01K51A8871T6FVN7J741SK7FMZ",
+    "t": "amo.lead",
+    "payload": {
+      "lead_uid": "01K51A6VA4AQTF47A7TKNVFX5R",
+      "created_at": "2025-09-13T10:34:36.639Z",
+      "flow": "salon",
+      "source": {
+        "start_param": "organic",
+        "utm": {
+          "source": "",
+          "medium": "",
+          "campaign": "",
+          "content": ""
+        }
+      },
+      "contact": {
+        "phone_e164": "+79854530287",
+        "tg_username": "Michail7977",
+        "name": "Micha"
+      },
+      "geo": {
+        "city": "Санкт-Петербург",
+        "delivery_city": null
+      },
+      "budget": {
+        "min": 5000000,
+        "max": null,
+        "currency": "RUB"
+      },
+      "prefs": {
+        "country": null,
+        "body": "кроссовер",
+        "fuel": null,
+        "transmission": null,
+        "drive": null
+      },
+      "consent": {
+        "accepted": true,
+        "version": "2025-09-01",
+        "ts": "2025-09-13T10:34:36.639Z"
+      }
+    },
+    "responsible_id": 2222222,
+    "attempts": 6,
+    "next_at": 1757949529799
+  }
+]
