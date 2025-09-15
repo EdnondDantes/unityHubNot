@@ -77,14 +77,13 @@ const rr     = loadJSON(RR_PATH, { i: 0 }); // round-robin
 
 // ----------------- FAQ загрузка и индексы -----------------
 const FAQ_PAGE_SIZE = 8;
-
 const FAQ = loadJSON(FAQ_PATH, { sections: [] });
 const FAQIndex = buildFaqIndex(FAQ);
 
 function buildFaqIndex(faq) {
   const secById = new Map();
-  const subByKey = new Map(); // `${secId}:${subId}` -> sub
-  const qById = new Map();    // qid -> {secId, subId, q, a}
+  const subByKey = new Map();
+  const qById = new Map();
   for (const sec of faq.sections || []) {
     secById.set(sec.id, sec);
     for (const sub of sec.subs || []) {
@@ -106,20 +105,6 @@ function loadJSON(file, fallback) {
 }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function nowISO() { return new Date().toISOString(); }
-function normalizePhoneE164(raw) {
-  if (!raw) return null;
-  let p = String(raw).replace(/[^\d+]/g, '');
-  if (p.startsWith('8') && p.length === 11) p = '+7' + p.slice(1);
-  if (!p.startsWith('+')) p = '+' + p;
-  return p;
-}
-function nextResponsible() {
-  if (!RESPONSIBLES.length) return null;
-  const id = RESPONSIBLES[rr.i % RESPONSIBLES.length];
-  rr.i = (rr.i + 1) % RESPONSIBLES.length;
-  saveJSON(RR_PATH, rr);
-  return id;
-}
 function fmt(n) { return (n || 0).toLocaleString('ru-RU'); }
 function humanBudget(b) {
   if (!b) return '—';
@@ -139,6 +124,56 @@ function parseUTM(startParam) {
     if (k === 'utm_content') res.content = v;
   }
   return res;
+}
+
+// ---------- Валидация города ----------
+function cleanCityInput(t) {
+  return String(t || '')
+    .trim()
+    .replace(/^(г\.?|город)\s+/i, '')
+    .replace(/\s{2,}/g, ' ');
+}
+function isCityValid(t) {
+  return /^[\p{L}\s\-’']+$/u.test(t) && t.length >= 2 && t.length <= 50;
+}
+function normalizeCityCase(t) {
+  return t.replace(/\p{L}+/gu, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
+}
+function normalizeCityOrNull(raw) {
+  let t = cleanCityInput(raw);
+  if (!isCityValid(t)) return null;
+  t = t.replace(/[-–—]/g, '-');
+  return normalizeCityCase(t);
+}
+
+// ---------- Парсинг бюджета ----------
+function parseBudgetInput(raw) {
+  if (!raw) return null;
+  let s = String(raw).trim().toLowerCase();
+  s = s.replace(/(\d)\s+(?=\d)/g, '$1');
+  s = s.replace(',', '.');
+
+  let multiplier = 1;
+  if (/(млн|m(illion)?|м\b)/.test(s)) multiplier = 1_000_000;
+  else if (/(тыс|k\b|к\b)/.test(s)) multiplier = 1_000;
+
+  const rgxRange = /(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)/;
+  const mRange = s.match(rgxRange);
+  if (mRange) {
+    const a = Math.round(parseFloat(mRange[1]) * multiplier);
+    const b = Math.round(parseFloat(mRange[2]) * multiplier);
+    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0 && a < b) {
+      return { min: a, max: b, currency: 'RUB' };
+    }
+    return null;
+  }
+
+  const mOne = s.match(/(\d+(?:\.\d+)?)/);
+  if (mOne) {
+    const v = Math.round(parseFloat(mOne[1]) * multiplier);
+    if (Number.isFinite(v) && v > 0) return { min: v, max: null, currency: 'RUB' };
+  }
+  return null;
 }
 
 // ----------------- AmoCRM клиент -----------------
@@ -196,8 +231,8 @@ const amo = (() => {
   async function createOrUpdateContact({ phone_e164, name, tg_username }) {
     const found = await findContactByPhone(phone_e164);
     const contactCF = [];
-    if (Number(process.env.AMO_CF_CONTACT_TELEGRAM_ID || 0) && tg_username) {
-      contactCF.push(cfValue(Number(process.env.AMO_CF_CONTACT_TELEGRAM_ID), `@${tg_username}`));
+    if (AMO_CF_CONTACT_TELEGRAM_ID && tg_username) {
+      contactCF.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
     }
 
     if (found) {
@@ -237,17 +272,17 @@ const amo = (() => {
       if (CF.CURRENCY   && budget.currency)     cfs.push(cfValue(CF.CURRENCY, budget.currency));
     }
     if (prefs) {
-      if (CF.BODY && prefs.body)             cfs.push(cfValue(CF.BODY, prefs.body));
+      if (CF.BODY && prefs.body)                 cfs.push(cfValue(CF.BODY, prefs.body));
       if (CF.TRANSMISSION && prefs.transmission) cfs.push(cfValue(CF.TRANSMISSION, prefs.transmission));
-      if (CF.DRIVE && prefs.drive)           cfs.push(cfValue(CF.DRIVE, prefs.drive));
-      if (CF.FUEL && prefs.fuel)             cfs.push(cfValue(CF.FUEL, prefs.fuel));
+      if (CF.DRIVE && prefs.drive)               cfs.push(cfValue(CF.DRIVE, prefs.drive));
+      if (CF.FUEL && prefs.fuel)                 cfs.push(cfValue(CF.FUEL, prefs.fuel));
     }
     if (CF.START_PARAM && start_param) cfs.push(cfValue(CF.START_PARAM, start_param));
     if (utm) {
-      if (CF.UTM_SOURCE && utm.source)   cfs.push(cfValue(CF.UTM_SOURCE, utm.source));
-      if (CF.UTM_MEDIUM && utm.medium)   cfs.push(cfValue(CF.UTM_MEDIUM, utm.medium));
+      if (CF.UTM_SOURCE && utm.source)     cfs.push(cfValue(CF.UTM_SOURCE, utm.source));
+      if (CF.UTM_MEDIUM && utm.medium)     cfs.push(cfValue(CF.UTM_MEDIUM, utm.medium));
       if (CF.UTM_CAMPAIGN && utm.campaign) cfs.push(cfValue(CF.UTM_CAMPAIGN, utm.campaign));
-      if (CF.UTM_CONTENT && utm.content) cfs.push(cfValue(CF.UTM_CONTENT, utm.content));
+      if (CF.UTM_CONTENT && utm.content)   cfs.push(cfValue(CF.UTM_CONTENT, utm.content));
     }
     if (consent && CF.PD_VERSION && CF.PD_TS) {
       cfs.push(cfValue(CF.PD_VERSION, consent.version || ''));
@@ -339,6 +374,11 @@ function chips(s) {
     if (s.prefs.fuel) arr.push(`Топливо: ${s.prefs.fuel}`);
   }
   if (s.contact_method) arr.push(`Связь: ${s.contact_method}`);
+
+  if (s.await_text === 'delivery_city') arr.push('Доставка: введите город…');
+  if (s.await_text === 'city')          arr.push('Город: введите название…');
+  if (s.await_text === 'budget_custom') arr.push('Бюджет: введите сумму/диапазон…');
+
   return arr.length ? `\n\n${arr.map(x => `• ${x}`).join('\n')}` : '';
 }
 
@@ -349,6 +389,18 @@ function kbMain() {
     [Markup.button.url('Новостной канал', NEWS_CHANNEL_URL || 'https://t.me')],
     [Markup.button.callback('Ответы на вопросы', 'faq')]
   ]);
+}
+
+// Текст главного меню + пересоздание его внизу
+function homeText() {
+  return [
+    '👋 Официальный бот Unity Auto.',
+    'Проверим VIN, подберём авто из салона или рассчитаем импорт из 5 стран.',
+    'Выберите действие ниже:'
+  ].join('\n');
+}
+async function rebaseHome(ctx, s) {
+  await rebaseMaster(ctx, s, homeText(), kbMain());
 }
 
 // ----------------- Рендер мастера -----------------
@@ -485,7 +537,6 @@ function renderFaqSections() {
   const text = '❓ Разделы ответов на вопросы:';
   return { text, markup: Markup.inlineKeyboard(rows) };
 }
-
 function renderFaqSubs(secId) {
   const sec = FAQIndex.secById.get(secId);
   if (!sec) return { text: 'Раздел не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]]) };
@@ -495,7 +546,6 @@ function renderFaqSubs(secId) {
   const text = `❓ ${sec.title}\nВыберите подраздел:`;
   return { text, markup: Markup.inlineKeyboard(rows) };
 }
-
 function renderFaqQuestions(secId, subId, page = 0) {
   const key = `${secId}:${subId}`;
   const sub = FAQIndex.subByKey.get(key);
@@ -522,7 +572,6 @@ function renderFaqQuestions(secId, subId, page = 0) {
   const text = `❓ ${sec.title} → ${sub.title}\nВыберите вопрос:`;
   return { text, markup: Markup.inlineKeyboard(rows) };
 }
-
 function renderFaqAnswer(qid) {
   const q = FAQIndex.qById.get(qid);
   if (!q) return { text: 'Вопрос не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]]) };
@@ -545,14 +594,8 @@ async function ensureMasterMessage(ctx, s) {
 }
 async function renderHome(ctx, s) {
   const m = await ensureMasterMessage(ctx, s);
-  const text = [
-    '👋 Официальный бот Unity Auto.',
-    'Проверим VIN, подберём авто из салона или рассчитаем импорт из 5 стран.',
-    'Выберите действие ниже:'
-  ].join('\n');
-  await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, kbMain());
+  await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, homeText(), kbMain());
 }
-
 async function deleteMasterIfAny(ctx, s) {
   if (s.master && s.master.chat_id && s.master.message_id) {
     try { await ctx.telegram.deleteMessage(s.master.chat_id, s.master.message_id); } catch (e) {}
@@ -579,6 +622,22 @@ async function safeEdit(ctx, m, text, markup, parse_mode) {
     }
   }
 }
+// пересоздание «живого» меню ниже пользовательского ввода
+async function rebaseMaster(ctx, s, text, markup, parse_mode) {
+  await deleteMasterIfAny(ctx, s);
+  const m = await ctx.reply(text, {
+    ...markup,
+    ...(parse_mode ? { parse_mode } : {}),
+    disable_web_page_preview: true
+  });
+  s.master = { chat_id: m.chat.id, message_id: m.message_id };
+  return s.master;
+}
+// универсальная обёртка для служебных сообщений + главного меню
+async function notifyAndRebaseHome(ctx, s, text, extra = {}) {
+  await ctx.reply(text, extra);
+  await rebaseHome(ctx, s);
+}
 
 // ----------------- /start -----------------
 bot.start(async (ctx) => {
@@ -593,13 +652,12 @@ bot.start(async (ctx) => {
     s.lead_uid = ulid();
     S.set(ctx.from.id, s);
 
-    // Опционально: видеокружок
     // try { await ctx.replyWithVideoNote({ source: path.join(__dirname, 'assets/welcome.mp4') }); } catch {}
 
     await renderHome(ctx, s);
   } catch (e) {
     LOG.error(e);
-    await ctx.reply('Упс, что-то пошло не так. Попробуйте ещё раз.');
+    await notifyAndRebaseHome(ctx, {}, 'Упс, что-то пошло не так. Попробуйте ещё раз.');
   }
 });
 
@@ -612,7 +670,6 @@ bot.action('home', async (ctx) => {
   s.step = 0;
   await renderHome(ctx, s);
 });
-
 bot.action('faq', async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -621,7 +678,6 @@ bot.action('faq', async (ctx) => {
   const { text, markup } = renderFaqSections();
   await safeEdit(ctx, m, text, markup);
 });
-
 bot.action(/^faq:sec:([^:]+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -630,7 +686,6 @@ bot.action(/^faq:sec:([^:]+)$/, async (ctx) => {
   const { text, markup } = renderFaqSubs(secId);
   await safeEdit(ctx, m, text, markup);
 });
-
 bot.action(/^faq:sub:([^:]+):([^:]+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -639,7 +694,6 @@ bot.action(/^faq:sub:([^:]+):([^:]+)$/, async (ctx) => {
   const { text, markup } = renderFaqQuestions(secId, subId, 0);
   await safeEdit(ctx, m, text, markup);
 });
-
 bot.action(/^faq:list:([^:]+):([^:]+):?(\d+)?$/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -648,7 +702,6 @@ bot.action(/^faq:list:([^:]+):([^:]+):?(\d+)?$/, async (ctx) => {
   const { text, markup } = renderFaqQuestions(secId, subId, page);
   await safeEdit(ctx, m, text, markup);
 });
-
 bot.action(/^faq:q:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -669,12 +722,12 @@ bot.action('flow:import', async (ctx) => {
   s.delivery_city = null;
   s.budget = null;
   s.prefs = {};
+  s.await_text = null;
   S.set(ctx.from.id, s);
   const m = await ensureMasterMessage(ctx, s);
   const { text, markup } = renderImportPage(s);
   await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, markup);
 });
-
 bot.action('flow:salon', async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id) || {};
@@ -685,6 +738,7 @@ bot.action('flow:salon', async (ctx) => {
   s.city = null;
   s.budget = null;
   s.prefs = {};
+  s.await_text = null;
   S.set(ctx.from.id, s);
   const m = await ensureMasterMessage(ctx, s);
   const { text, markup } = renderSalonPage(s);
@@ -696,27 +750,39 @@ bot.action(/imp:(.+)/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id); if (!s) return;
 
-  const [type, a, b] = ctx.match[1].split(':'); // country:KR / dc:msk / bud:a / pref:body:седан / cm:tg / next / back / contact
+  const [type, a, b] = ctx.match[1].split(':');
   if (type === 'country') { s.country = a; s.step = 2; }
+
   if (type === 'dc') {
     const found = PRESET_CITIES.find(x => x.k === a);
     if (found) {
-      if (a === 'oth') s.await_text = 'delivery_city';
-      else { s.delivery_city = found.t; s.step = 3; }
+      if (a === 'oth') {
+        s.await_text = 'delivery_city';
+        await ctx.reply('Введите город доставки (только буквы, пробелы и дефисы). Пример: "Ростов-на-Дону"');
+      } else {
+        s.delivery_city = found.t; s.step = 3;
+      }
     }
   }
+
   if (type === 'bud') {
     const preset = PRESET_BUDGETS.find(x => x.k === a);
     if (preset) {
-      if (preset.custom) s.await_text = 'budget_custom';
-      else { s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 4; }
+      if (preset.custom) {
+        s.await_text = 'budget_custom';
+        await ctx.reply('Введите бюджет числом или диапазоном. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
+      } else {
+        s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 4;
+      }
     }
   }
+
   if (type === 'pref') {
     const [field, val] = [a, b];
     s.prefs = s.prefs || {};
     s.prefs[field] = (s.prefs[field] === val) ? null : val;
   }
+
   if (type === 'cm') { s.contact_method = a; }
   if (type === 'next') { s.step = Math.min(6, (s.step || 1) + 1); }
   if (type === 'back') { s.step = Math.max(1, (s.step || 1) - 1); }
@@ -732,26 +798,37 @@ bot.action(/sal:(.+)/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id); if (!s) return;
 
-  const [type, a, b] = ctx.match[1].split(':'); // city:msk / bud:a / pref:body:седан / cm:tg / next / back / contact
+  const [type, a, b] = ctx.match[1].split(':');
   if (type === 'city') {
     const found = PRESET_CITIES.find(x => x.k === a);
     if (found) {
-      if (a === 'oth') s.await_text = 'city';
-      else { s.city = found.t; s.step = 2; }
+      if (a === 'oth') {
+        s.await_text = 'city';
+        await ctx.reply('Введите ваш город (только буквы, пробелы и дефисы). Пример: "Санкт-Петербург"');
+      } else {
+        s.city = found.t; s.step = 2;
+      }
     }
   }
+
   if (type === 'bud') {
     const preset = PRESET_BUDGETS.find(x => x.k === a);
     if (preset) {
-      if (preset.custom) s.await_text = 'budget_custom';
-      else { s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 3; }
+      if (preset.custom) {
+        s.await_text = 'budget_custom';
+        await ctx.reply('Введите бюджет числом или диапазоном. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
+      } else {
+        s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 3;
+      }
     }
   }
+
   if (type === 'pref') {
     const [field, val] = [a, b];
     s.prefs = s.prefs || {};
     s.prefs[field] = (s.prefs[field] === val) ? null : val;
   }
+
   if (type === 'cm') { s.contact_method = a; }
   if (type === 'next') { s.step = Math.min(5, (s.step || 1) + 1); }
   if (type === 'back') { s.step = Math.max(1, (s.step || 1) - 1); }
@@ -767,55 +844,64 @@ bot.on('contact', async (ctx) => {
   const s = S.get(ctx.from.id);
   if (!s) return;
 
-  const phone = normalizePhoneE164(ctx.message.contact.phone_number);
-  s.phone = phone;
+  const raw = String(ctx.message.contact.phone_number || '').replace(/[^\d+]/g, '');
+  const phoneE164 = raw.startsWith('+') ? raw : (raw.startsWith('8') && raw.length === 11 ? '+7' + raw.slice(1) : '+' + raw);
+  s.phone = phoneE164;
   s.contact_name = `${ctx.message.contact.first_name || ''} ${ctx.message.contact.last_name || ''}`.trim() || ctx.from.first_name || '';
 
-  // (1) Подтверждение + убираем клавиатуру
   await ctx.reply('Спасибо! Контакт получен ✅', Markup.removeKeyboard());
-
-  // (2) Удаляем верхнее «живое» сообщение мастера
   await deleteMasterIfAny(ctx, s);
-
-  // (3) Финализируем и шлём финал новым сообщением
   await finalizeAndSend(ctx, s, { sendNew: true });
 });
 
-// --------- Приём обычного текста (города/бюджет custom) ---------
+// --------- Приём обычного текста (город/бюджет custom, с ребейзом меню) ---------
 bot.on('text', async (ctx) => {
   const s = S.get(ctx.from.id);
   if (!s || !s.await_text) return;
   const t = ctx.message.text.trim();
 
   if (s.await_text === 'delivery_city') {
-    s.delivery_city = t; s.await_text = null; s.step = 3;
-  } else if (s.await_text === 'city') {
-    s.city = t; s.await_text = null; s.step = 2;
-  } else if (s.await_text === 'budget_custom') {
-    const num = Number(t.replace(/\s+/g, '').replace(/[^\d]/g, ''));
-    if (Number.isFinite(num) && num > 0) {
-      s.budget = { min: num, max: null, currency: 'RUB' };
-      s.await_text = null; s.step = s.flow === 'import' ? 4 : 3;
-    } else {
-      await ctx.reply('Введите сумму числом, например: 2000000');
+    const norm = normalizeCityOrNull(t);
+    if (!norm) {
+      await notifyAndRebaseHome(ctx, s, 'Неверный формат города. Используйте только буквы, пробелы и дефисы. Пример: "Ростов-на-Дону"');
       return;
     }
+    s.delivery_city = norm;
+    s.await_text = null;
+    s.step = 3;
+  } else if (s.await_text === 'city') {
+    const norm = normalizeCityOrNull(t);
+    if (!norm) {
+      await notifyAndRebaseHome(ctx, s, 'Неверный формат города. Используйте только буквы, пробелы и дефисы. Пример: "Санкт-Петербург"');
+      return;
+    }
+    s.city = norm;
+    s.await_text = null;
+    s.step = 2;
+  } else if (s.await_text === 'budget_custom') {
+    const parsed = parseBudgetInput(t);
+    if (!parsed) {
+      await notifyAndRebaseHome(ctx, s, 'Неверный формат бюджета. Введите число или диапазон. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
+      return;
+    }
+    s.budget = parsed;
+    s.await_text = null;
+    s.step = s.flow === 'import' ? 4 : 3;
   }
 
-  const m = await ensureMasterMessage(ctx, s);
+  // Пересоздаём «живое» меню НИЖЕ сообщения пользователя
   const view = s.flow === 'import' ? renderImportPage(s) : renderSalonPage(s);
-  await safeEdit(ctx, m, view.text, view.markup);
+  await rebaseMaster(ctx, s, view.text, view.markup);
 });
 
 // --------- Финализация и отправка в amoCRM ---------
 async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
   try {
     if (!s.phone) {
-      await ctx.reply('Нужно подтвердить телефон, нажмите «Отправить телефон».');
+      await notifyAndRebaseHome(ctx, s, 'Нужно подтвердить телефон, нажмите «Отправить телефон».');
       return;
     }
 
-    // дедуп (30 дней) — бот-сторона
     const last = dedup[s.phone];
     if (last && dayjs().diff(dayjs(last), 'day') < 30) {
       LOG.info({ phone: s.phone }, 'dedup: recent');
@@ -845,7 +931,8 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     s.step = 0;
   } catch (e) {
     LOG.error(e, 'finalize error');
-    await ctx.reply('Не получилось отправить заявку сразу. Мы повторим попытку автоматически.');
+    // после сообщения об ошибке — пересоздать Главное меню НИЖЕ
+    await notifyAndRebaseHome(ctx, s, 'Не получилось отправить заявку сразу. Мы повторим попытку автоматически.');
   }
 }
 
@@ -853,7 +940,7 @@ function buildPayloadFromState(ctx, s) {
   return {
     lead_uid: s.lead_uid || ulid(),
     created_at: nowISO(),
-    flow: s.flow, // import | salon
+    flow: s.flow,
     source: { start_param: s.start_param || 'organic', utm: s.utm || {} },
     contact: {
       phone_e164: s.phone,
@@ -892,7 +979,6 @@ function queueAmoDelivery({ payload, responsible_id }) {
   });
   saveJSON(OUTBOX_PATH, outbox);
 }
-
 setInterval(processOutboxTick, 2000);
 
 async function processOutboxTick() {
@@ -918,26 +1004,22 @@ async function processOutboxTick() {
     }
   }
 }
-
 function attemptBackoff(n) {
-  if (n <= 1) return 60 * 1000;        // 1 мин
-  if (n === 2) return 5 * 60 * 1000;   // 5 мин
-  if (n === 3) return 15 * 60 * 1000;  // 15 мин
-  if (n === 4) return 60 * 60 * 1000;  // 1 ч
-  return 6 * 60 * 60 * 1000;           // 6 ч
+  if (n <= 1) return 60 * 1000;
+  if (n === 2) return 5 * 60 * 1000;
+  if (n === 3) return 15 * 60 * 1000;
+  if (n === 4) return 60 * 60 * 1000;
+  return 6 * 60 * 60 * 1000;
 }
-
 async function deliverLeadToAmo(payload, responsible_id) {
   const { contact, flow, prefs, source, geo, budget, consent } = payload;
 
-  // 1) Контакт
   const contact_id = await amo.createOrUpdateContact({
     phone_e164: contact.phone_e164,
     name: contact.name,
     tg_username: contact.tg_username
   });
 
-  // 2) Сделка
   const lead_id = await amo.createLead({
     flow,
     country: prefs.country,
@@ -951,17 +1033,14 @@ async function deliverLeadToAmo(payload, responsible_id) {
     responsible_id
   });
 
-  // 3) Линковка
   await amo.linkContactToLead(contact_id, lead_id);
 
-  // 4) Задача + заметка
   const completeAt = Date.now() + 15 * 60 * 1000;
   await amo.addTask(lead_id, 'Первичный контакт с клиентом', completeAt);
   await amo.addNote(lead_id, leadSummary(payload));
 
   LOG.info({ lead_id, contact_id }, 'amo: lead created');
 }
-
 function leadSummary(p) {
   const parts = [];
   if (p.flow === 'import') {
@@ -981,6 +1060,15 @@ function leadSummary(p) {
   return parts.join('\n');
 }
 
+// --------- Round-robin ответственный ---------
+function nextResponsible() {
+  if (!RESPONSIBLES.length) return null;
+  const idx = rr.i % RESPONSIBLES.length;
+  rr.i = (rr.i + 1) % RESPONSIBLES.length;
+  saveJSON(RR_PATH, rr);
+  return RESPONSIBLES[idx];
+}
+
 // --------- Запрос телефона (ПДн) ---------
 async function askContact(ctx, s) {
   await ctx.reply(
@@ -996,7 +1084,5 @@ bot.launch().then(() => {
   LOG.error(e, 'bot.launch error');
   process.exit(1);
 });
-
-// Корректное завершение
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
