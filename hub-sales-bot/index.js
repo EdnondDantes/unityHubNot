@@ -1,4 +1,13 @@
-// Unity Auto LeadBot — Node 16, CommonJS
+// Unity Auto LeadBot 2.0.1 — Node 16, CommonJS
+const {
+  MSG_CALC_INTRO,
+  MSG_QA_INTRO,
+  MSG_ASK_MAKE_MODEL,
+  MSG_ASK_CONDITION,
+  MSG_CUSTOMS_NOTE,
+  MSG_THANKS_SERVICES,
+} = require('./messages');
+
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fetch = require('node-fetch');
@@ -22,8 +31,9 @@ const FAQ_PATH = path.join(__dirname, 'faq.json');
 // ----------------- Конфиг окружения -----------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID || 0);
-const VIN_BOT_URL = process.env.VIN_BOT_URL;
-const NEWS_CHANNEL_URL = process.env.NEWS_CHANNEL_URL;
+const VIN_BOT_URL = process.env.VIN_BOT_URL || 'https://t.me';
+const NEWS_CHANNEL_URL = process.env.NEWS_CHANNEL_URL || 'https://t.me';
+const CATALOG_URL = process.env.CATALOG_URL || 'https://example.com';
 
 // amoCRM
 const AMO_BASE_URL = process.env.AMO_BASE_URL;
@@ -32,11 +42,9 @@ const AMO_CLIENT_SECRET = process.env.AMO_CLIENT_SECRET;
 const AMO_REDIRECT_URI = process.env.AMO_REDIRECT_URI;
 const AMO_REFRESH_TOKEN = process.env.AMO_REFRESH_TOKEN;
 
-// Пайплайны/статусы
+// Пайплайн/статус
 const AMO_PIPELINE_IMPORT_ID = Number(process.env.AMO_PIPELINE_IMPORT_ID || 0);
-const AMO_PIPELINE_SALON_ID = Number(process.env.AMO_PIPELINE_SALON_ID || 0);
 const AMO_STATUS_IMPORT_NEW_ID = Number(process.env.AMO_STATUS_IMPORT_NEW_ID || 0);
-const AMO_STATUS_SALON_NEW_ID = Number(process.env.AMO_STATUS_SALON_NEW_ID || 0);
 
 // Кастомные поля LEAD
 const CF = {
@@ -44,13 +52,6 @@ const CF = {
   COUNTRY: Number(process.env.AMO_CF_LEAD_COUNTRY_ID || 0),
   DELIVERY_CITY: Number(process.env.AMO_CF_LEAD_DELIVERY_CITY_ID || 0),
   CITY: Number(process.env.AMO_CF_LEAD_CITY_ID || 0),
-  BUDGET_MIN: Number(process.env.AMO_CF_LEAD_BUDGET_MIN_ID || 0),
-  BUDGET_MAX: Number(process.env.AMO_CF_LEAD_BUDGET_MAX_ID || 0),
-  CURRENCY: Number(process.env.AMO_CF_LEAD_CURRENCY_ID || 0),
-  BODY: Number(process.env.AMO_CF_LEAD_BODY_ID || 0),
-  TRANSMISSION: Number(process.env.AMO_CF_LEAD_TRANSMISSION_ID || 0),
-  DRIVE: Number(process.env.AMO_CF_LEAD_DRIVE_ID || 0),
-  FUEL: Number(process.env.AMO_CF_LEAD_FUEL_ID || 0),
   START_PARAM: Number(process.env.AMO_CF_LEAD_START_PARAM_ID || 0),
   UTM_SOURCE: Number(process.env.AMO_CF_LEAD_UTM_SOURCE_ID || 0),
   UTM_MEDIUM: Number(process.env.AMO_CF_LEAD_UTM_MEDIUM_ID || 0),
@@ -70,12 +71,12 @@ const RESPONSIBLES = String(process.env.AMO_RESPONSIBLES || '')
   .filter(Boolean);
 
 // ----------------- Состояния/хранилища -----------------
-const S = new Map(); // состояния пользователей
-const outbox = loadJSON(OUTBOX_PATH, []); // очередь доставок
-const dedup  = loadJSON(DEDUP_PATH, {});  // { "+7999...": "2025-09-12T..." }
-const rr     = loadJSON(RR_PATH, { i: 0 }); // round-robin
+const S = new Map();
+const outbox = loadJSON(OUTBOX_PATH, []);
+const dedup  = loadJSON(DEDUP_PATH, {});
+const rr     = loadJSON(RR_PATH, { i: 0 });
 
-// ----------------- FAQ загрузка и индексы -----------------
+// ----------------- FAQ -----------------
 const FAQ_PAGE_SIZE = 8;
 const FAQ = loadJSON(FAQ_PATH, { sections: [] });
 const FAQIndex = buildFaqIndex(FAQ);
@@ -98,20 +99,12 @@ function buildFaqIndex(faq) {
 
 // ----------------- Утилиты -----------------
 function loadJSON(file, fallback) {
-  try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) { LOG.warn({ e }, `loadJSON error: ${file}`); }
+  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { LOG.warn({ e }, `loadJSON error: ${file}`); }
   return fallback;
 }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function nowISO() { return new Date().toISOString(); }
-function fmt(n) { return (n || 0).toLocaleString('ru-RU'); }
-function humanBudget(b) {
-  if (!b) return '—';
-  if (b.min != null && b.max != null) return `${fmt(b.min)}–${fmt(b.max)} ₽`;
-  if (b.min != null && b.max == null) return `от ${fmt(b.min)} ₽`;
-  return '—';
-}
 function parseUTM(startParam) {
   const res = { source: '', medium: '', campaign: '', content: '' };
   if (!startParam) return res;
@@ -125,8 +118,16 @@ function parseUTM(startParam) {
   }
   return res;
 }
+function capitalizeWords(s) {
+  return String(s || '').trim().replace(/\p{L}+/gu, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
+}
 
-// ---------- Валидация города ----------
+// --- Валидации ---
+function validateBrandModel(t) {
+  const s = String(t || '').trim();
+  if (s.length < 2 || s.length > 40) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9\s\-]+$/.test(s);
+}
 function cleanCityInput(t) {
   return String(t || '')
     .trim()
@@ -136,45 +137,47 @@ function cleanCityInput(t) {
 function isCityValid(t) {
   return /^[\p{L}\s\-’']+$/u.test(t) && t.length >= 2 && t.length <= 50;
 }
-function normalizeCityCase(t) {
-  return t.replace(/\p{L}+/gu, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
-}
 function normalizeCityOrNull(raw) {
   let t = cleanCityInput(raw);
   if (!isCityValid(t)) return null;
   t = t.replace(/[-–—]/g, '-');
-  return normalizeCityCase(t);
+  return capitalizeWords(t);
 }
-
-// ---------- Парсинг бюджета ----------
-function parseBudgetInput(raw) {
-  if (!raw) return null;
-  let s = String(raw).trim().toLowerCase();
-  s = s.replace(/(\d)\s+(?=\d)/g, '$1');
-  s = s.replace(',', '.');
-
-  let multiplier = 1;
-  if (/(млн|m(illion)?|м\b)/.test(s)) multiplier = 1_000_000;
-  else if (/(тыс|k\b|к\b)/.test(s)) multiplier = 1_000;
-
-  const rgxRange = /(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)/;
-  const mRange = s.match(rgxRange);
-  if (mRange) {
-    const a = Math.round(parseFloat(mRange[1]) * multiplier);
-    const b = Math.round(parseFloat(mRange[2]) * multiplier);
-    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0 && a < b) {
-      return { min: a, max: b, currency: 'RUB' };
-    }
-    return null;
-  }
-
-  const mOne = s.match(/(\d+(?:\.\d+)?)/);
-  if (mOne) {
-    const v = Math.round(parseFloat(mOne[1]) * multiplier);
-    if (Number.isFinite(v) && v > 0) return { min: v, max: null, currency: 'RUB' };
-  }
-  return null;
+function parseYear(t) {
+  const y = Number(String(t).trim().match(/\b(19[6-9]\d|20[0-2]\d|2025)\b/)?.[0] || NaN);
+  if (!Number.isInteger(y) || y < 1960 || y > 2025) return null;
+  return y;
 }
+function parseMileage(t) {
+  let s = String(t || '').toLowerCase();
+  const km = Number(s.replace(/[^\d]/g, ''));
+  if (!Number.isFinite(km) || km <= 0) return null;
+  return km; // «до N км»
+}
+function fmt(n) { return (n || 0).toLocaleString('ru-RU'); }
+
+// ----------------- Константы UI и прайсы -----------------
+const COUNTRIES = [
+  { code: 'EU', flag: '🇪🇺', title: 'Европа' },
+  { code: 'KR', flag: '🇰🇷', title: 'Корея' },
+  { code: 'CN', flag: '🇨🇳', title: 'Китай' },
+  { code: 'US', flag: '🇺🇸', title: 'США' },
+  { code: 'AE', flag: '🇦🇪', title: 'ОАЭ' }
+];
+
+const COST = {
+  CN: { delivery: 150000, days: 20, service: 150000 },
+  EU: { delivery: 450000, days: 45, service: 150000 },
+  AE: { delivery: 290000, days: 45, service: 150000 },
+  US: { delivery: 350000, days: 60, service: 150000 },
+  KR: { delivery: 250000, days: 30, service: 150000 }
+};
+
+const PRESET_CITIES = [
+  { k: 'msk', t: 'Москва' },
+  { k: 'spb', t: 'Санкт-Петербург' },
+  { k: 'oth', t: 'Указать свой' }
+];
 
 // ----------------- AmoCRM клиент -----------------
 const amo = (() => {
@@ -196,13 +199,10 @@ const amo = (() => {
     const data = await res.json();
     amo.accessToken = data.access_token;
     amo.expiresAt = Date.now() + (data.expires_in - 60) * 1000;
-    LOG.info('amo: token refreshed');
   }
-
   async function ensureToken() {
     if (!amo.accessToken || Date.now() > amo.expiresAt) await refreshToken();
   }
-
   async function api(method, path, body) {
     await ensureToken();
     const url = `${AMO_BASE_URL}${path}`;
@@ -219,22 +219,28 @@ const amo = (() => {
     if (res.status === 204) return null;
     return res.json();
   }
-
-  async function findContactByPhone(phone) {
-    const q = encodeURIComponent(phone);
-    const data = await api('GET', `/api/v4/contacts?limit=1&query=${q}`);
-    return (data && data._embedded && data._embedded.contacts && data._embedded.contacts[0]) || null;
-  }
-
   function cfValue(field_id, value) { return { field_id, values: [{ value }] }; }
 
   async function createOrUpdateContact({ phone_e164, name, tg_username }) {
-    const found = await findContactByPhone(phone_e164);
+    // контакт без телефона (если связь через TG)
+    if (!phone_e164) {
+      const body = [{
+        name: name || (tg_username ? `@${tg_username}` : 'Telegram lead'),
+        custom_fields_values: [
+          ...(AMO_CF_CONTACT_TELEGRAM_ID && tg_username ? [cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`)] : [])
+        ]
+      }];
+      const resp = await api('POST', `/api/v4/contacts`, body);
+      return resp._embedded.contacts[0].id;
+    }
+    // поиск/обновление по телефону
+    const q = encodeURIComponent(phone_e164);
+    const data = await api('GET', `/api/v4/contacts?limit=1&query=${q}`);
+    const found = data?._embedded?.contacts?.[0];
     const contactCF = [];
     if (AMO_CF_CONTACT_TELEGRAM_ID && tg_username) {
       contactCF.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
     }
-
     if (found) {
       const body = [{
         id: found.id,
@@ -256,49 +262,37 @@ const amo = (() => {
     }
   }
 
-  async function createLead({ flow, country, delivery_city, city, budget, prefs, start_param, utm, consent, responsible_id }) {
-    const pipeline_id = flow === 'import' ? AMO_PIPELINE_IMPORT_ID : AMO_PIPELINE_SALON_ID;
-    const status_id   = flow === 'import' ? AMO_STATUS_IMPORT_NEW_ID : AMO_STATUS_SALON_NEW_ID;
+  async function createLeadCalc({ payload, responsible_id }) {
+    const { bm, condition, used_year, used_mileage, city, country, comment, source, consent } = payload;
+    const pipeline_id = AMO_PIPELINE_IMPORT_ID;
+    const status_id = AMO_STATUS_IMPORT_NEW_ID;
 
     const cfs = [];
-    if (CF.DIRECTION)   cfs.push(cfValue(CF.DIRECTION, flow));
-    if (flow === 'import' && CF.COUNTRY && country) cfs.push(cfValue(CF.COUNTRY, country));
-    if (flow === 'import' && CF.DELIVERY_CITY && delivery_city) cfs.push(cfValue(CF.DELIVERY_CITY, delivery_city));
-    if (flow === 'salon'  && CF.CITY && city) cfs.push(cfValue(CF.CITY, city));
-
-    if (budget) {
-      if (CF.BUDGET_MIN && budget.min != null) cfs.push(cfValue(CF.BUDGET_MIN, budget.min));
-      if (CF.BUDGET_MAX && budget.max != null) cfs.push(cfValue(CF.BUDGET_MAX, budget.max));
-      if (CF.CURRENCY   && budget.currency)     cfs.push(cfValue(CF.CURRENCY, budget.currency));
-    }
-    if (prefs) {
-      if (CF.BODY && prefs.body)                 cfs.push(cfValue(CF.BODY, prefs.body));
-      if (CF.TRANSMISSION && prefs.transmission) cfs.push(cfValue(CF.TRANSMISSION, prefs.transmission));
-      if (CF.DRIVE && prefs.drive)               cfs.push(cfValue(CF.DRIVE, prefs.drive));
-      if (CF.FUEL && prefs.fuel)                 cfs.push(cfValue(CF.FUEL, prefs.fuel));
-    }
-    if (CF.START_PARAM && start_param) cfs.push(cfValue(CF.START_PARAM, start_param));
-    if (utm) {
-      if (CF.UTM_SOURCE && utm.source)     cfs.push(cfValue(CF.UTM_SOURCE, utm.source));
-      if (CF.UTM_MEDIUM && utm.medium)     cfs.push(cfValue(CF.UTM_MEDIUM, utm.medium));
-      if (CF.UTM_CAMPAIGN && utm.campaign) cfs.push(cfValue(CF.UTM_CAMPAIGN, utm.campaign));
-      if (CF.UTM_CONTENT && utm.content)   cfs.push(cfValue(CF.UTM_CONTENT, utm.content));
+    if (CF.DIRECTION) cfs.push(cfValue(CF.DIRECTION, 'calc'));
+    if (CF.COUNTRY && country) cfs.push(cfValue(CF.COUNTRY, country));
+    if (CF.DELIVERY_CITY && city) cfs.push(cfValue(CF.DELIVERY_CITY, city));
+    if (CF.CITY && city) cfs.push(cfValue(CF.CITY, city));
+    if (CF.START_PARAM && source?.start_param) cfs.push(cfValue(CF.START_PARAM, source.start_param));
+    if (source?.utm) {
+      if (CF.UTM_SOURCE && source.utm.source) cfs.push(cfValue(CF.UTM_SOURCE, source.utm.source));
+      if (CF.UTM_MEDIUM && source.utm.medium) cfs.push(cfValue(CF.UTM_MEDIUM, source.utm.medium));
+      if (CF.UTM_CAMPAIGN && source.utm.campaign) cfs.push(cfValue(CF.UTM_CAMPAIGN, source.utm.campaign));
+      if (CF.UTM_CONTENT && source.utm.content) cfs.push(cfValue(CF.UTM_CONTENT, source.utm.content));
     }
     if (consent && CF.PD_VERSION && CF.PD_TS) {
       cfs.push(cfValue(CF.PD_VERSION, consent.version || ''));
       cfs.push(cfValue(CF.PD_TS, consent.ts || ''));
     }
 
-    const name = flow === 'import'
-      ? `Импорт ${country || ''} • ${delivery_city || ''} • ${humanBudget(budget)}`
-      : `Салон • ${city || ''} • ${humanBudget(budget)}`;
+    const countryTitle = COUNTRIES.find(x => x.code === country)?.title || country || '';
+    const name = `Кальк • ${bm || 'Авто'} • ${countryTitle} → ${city || ''}`;
 
     const body = [{
       name,
       pipeline_id,
       status_id,
       ...(responsible_id ? { responsible_user_id: responsible_id } : {}),
-      custom_fields_values: cfs
+      ...(cfs.length ? { custom_fields_values: cfs } : {})
     }];
 
     const resp = await api('POST', `/api/v4/leads`, body);
@@ -309,7 +303,6 @@ const amo = (() => {
     const body = [{ to_entity_id: contact_id, to_entity_type: 'contacts' }];
     await api('POST', `/api/v4/leads/${lead_id}/link`, body);
   }
-
   async function addTask(lead_id, text, completeAtTs) {
     const body = [{
       text,
@@ -320,212 +313,602 @@ const amo = (() => {
     }];
     await api('POST', `/api/v4/tasks`, body);
   }
-
   async function addNote(lead_id, text) {
     const body = [{ note_type: 'common', params: { text } }];
     await api('POST', `/api/v4/leads/${lead_id}/notes`, body);
   }
 
-  return { createOrUpdateContact, createLead, linkContactToLead, addTask, addNote, accessToken: null, expiresAt: 0 };
+  return { createOrUpdateContact, createLeadCalc, linkContactToLead, addTask, addNote, accessToken: null, expiresAt: 0 };
 })();
 
 // ----------------- Telegram бот -----------------
 if (!BOT_TOKEN) { LOG.error('BOT_TOKEN is missing'); process.exit(1); }
 const bot = new Telegraf(BOT_TOKEN);
 
-// --------- Константы UI ----------
-const COUNTRIES = [
-  { code: 'CN', flag: '🇨🇳', title: 'Китай' },
-  { code: 'KR', flag: '🇰🇷', title: 'Корея' },
-  { code: 'AE', flag: '🇦🇪', title: 'ОАЭ' },
-  { code: 'US', flag: '🇺🇸', title: 'США' },
-  { code: 'EU', flag: '🇪🇺', title: 'Европа' }
-];
-
-const PRESET_CITIES = [
-  { k: 'msk', t: 'Москва' },
-  { k: 'spb', t: 'Санкт-Петербург' },
-  { k: 'ekb', t: 'Екатеринбург' },
-  { k: 'nsk', t: 'Новосибирск' },
-  { k: 'oth', t: 'Другой…' }
-];
-
-const PRESET_BUDGETS = [
-  { k: 'a', t: 'До 1.5 млн', min: 0, max: 1500000 },
-  { k: 'b', t: '1.5–3 млн', min: 1500000, max: 3000000 },
-  { k: 'c', t: '3–5 млн', min: 3000000, max: 5000000 },
-  { k: 'd', t: '5+ млн', min: 5000000, max: null },
-  { k: 'x', t: 'Укажу сам', custom: true }
-];
-
-function chips(s) {
-  const arr = [];
-  if (s.flow === 'import' && s.country) {
-    const c = COUNTRIES.find(x => x.code === s.country);
-    if (c) arr.push(`Страна: ${c.flag} ${c.title}`);
-  }
-  if (s.flow === 'import' && s.delivery_city) arr.push(`Доставка: ${s.delivery_city}`);
-  if (s.flow === 'salon' && s.city) arr.push(`Город: ${s.city}`);
-  if (s.budget) arr.push(`Бюджет: ${humanBudget(s.budget)}`);
-  if (s.prefs) {
-    if (s.prefs.body) arr.push(`Кузов: ${s.prefs.body}`);
-    if (s.prefs.transmission) arr.push(`КПП: ${s.prefs.transmission}`);
-    if (s.prefs.drive) arr.push(`Привод: ${s.prefs.drive}`);
-    if (s.prefs.fuel) arr.push(`Топливо: ${s.prefs.fuel}`);
-  }
-  if (s.contact_method) arr.push(`Связь: ${s.contact_method}`);
-
-  if (s.await_text === 'delivery_city') arr.push('Доставка: введите город…');
-  if (s.await_text === 'city')          arr.push('Город: введите название…');
-  if (s.await_text === 'budget_custom') arr.push('Бюджет: введите сумму/диапазон…');
-
-  return arr.length ? `\n\n${arr.map(x => `• ${x}`).join('\n')}` : '';
+// ----------------- Хелперы UI ----------------
+async function ensureMasterMessage(ctx, s) {
+  if (s.master && s.master.chat_id && s.master.message_id) return s.master;
+  const m = await ctx.reply('Загрузка…');
+  s.master = { chat_id: m.chat.id, message_id: m.message_id };
+  return s.master;
 }
 
-function kbMain() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('Подбор из салона', 'flow:salon'), Markup.button.callback('Импорт из 5 стран', 'flow:import')],
-    [Markup.button.url('Проверка по VIN', VIN_BOT_URL || 'https://t.me')],
-    [Markup.button.url('Новостной канал', NEWS_CHANNEL_URL || 'https://t.me')],
-    [Markup.button.callback('Ответы на вопросы', 'faq')]
-  ]);
-}
+bot.use((ctx, next) => {
+  ctx.replyHTML = (text, extra = {}) =>
+    ctx.reply(text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+  return next();
+});
 
-// Текст главного меню + пересоздание его внизу
+const sendHTML = (chatId, text, extra = {}) =>
+  bot.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+async function deleteMasterIfAny(ctx, s) {
+  if (s.master?.chat_id && s.master?.message_id) {
+    try { await ctx.telegram.deleteMessage(s.master.chat_id, s.master.message_id); } catch {}
+    s.master = null;
+  }
+}
+async function safeEdit(ctx, m, text, markup, parse_mode) {
+  try {
+    await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, {
+      ...markup,
+      ...(parse_mode ? { parse_mode } : {}),
+      disable_web_page_preview: true
+    });
+  } catch (e) {
+    if (!String(e).includes('message is not modified')) {
+      LOG.warn({ e: String(e) }, 'editMessageText warn');
+    }
+  }
+}
+async function rebaseMaster(ctx, s, text, markup, parse_mode) {
+  await deleteMasterIfAny(ctx, s);
+  const m = await ctx.reply(text, {
+    ...markup,
+    ...(parse_mode ? { parse_mode } : {}),
+    disable_web_page_preview: true
+  });
+  s.master = { chat_id: m.chat.id, message_id: m.message_id };
+  return s.master;
+}
 function homeText() {
   return [
     '👋 Официальный бот Unity Auto.',
-    'Проверим VIN, подберём авто из салона или рассчитаем импорт из 5 стран.',
+    'Здесь вы можете запустить расчёт доставки/подбора, связаться с менеджером или посмотреть ответы на популярные вопросы.',
+    '',
     'Выберите действие ниже:'
   ].join('\n');
 }
+function kbHome() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🚀 Начать', 'cta:start')],
+    [Markup.button.callback('👨‍💼 Связаться с менеджером', 'cta:manager')],
+    [Markup.button.callback('❓ Ответы на популярные вопросы', 'faq')]
+  ]);
+}
 async function rebaseHome(ctx, s) {
-  await rebaseMaster(ctx, s, homeText(), kbMain());
+  await rebaseMaster(ctx, s, homeText(), kbHome());
+}
+async function notifyAndRebaseHome(ctx, s, text, extra = {}) {
+  await ctx.reply(text, extra);
+  await rebaseHome(ctx, s);
 }
 
-// ----------------- Рендер мастера -----------------
-function renderImportPage(s) {
+// ----------------- Рендеры калькулятора -----------------
+function chipsCalc(s) {
+  const arr = [];
+  if (s.bm) arr.push(`Модель: ${s.bm}`);
+  if (s.condition === 'new') arr.push('Состояние: Новый');
+  if (s.condition === 'used') {
+    arr.push('Состояние: С пробегом');
+    if (s.used_year) arr.push(`Год: ${s.used_year}`);
+    if (s.used_mileage) arr.push(`Пробег: до ${fmt(s.used_mileage)} км`);
+  }
+  if (s.city) arr.push(`Доставка: ${s.city}`);
+  if (s.country) {
+    const ct = COUNTRIES.find(x => x.code === s.country);
+    if (ct) arr.push(`Страна: ${ct.flag} ${ct.title}`);
+  }
+  if (s.comment) arr.push('Комментарий: есть');
+  if (s.await_text === 'bm') arr.push('Введите марку/модель латиницей…');
+  if (s.await_text === 'year') arr.push('Введите год выпуска…');
+  if (s.await_text === 'mileage') arr.push('Введите ограничение пробега…');
+  if (s.await_text === 'city_custom') arr.push('Введите город доставки…');
+  if (s.await_text === 'comment') arr.push('Введите комментарий…');
+  return arr.length ? `\n\n${arr.map(x => `• ${x}`).join('\n')}` : '';
+}
+
+function renderCalcPage(s) {
   const step = s.step || 1;
-  let text = `🚗 Импорт авто • Шаг ${step}/6${chips(s)}\n`;
+  let text = `🔧 Калькулятор • Шаг ${step}/7${chipsCalc(s)}`;
   let rows = [];
 
   if (step === 1) {
-    text += '\nВыберите страну:';
-    rows = [
-      COUNTRIES.slice(0,3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `imp:country:${c.code}`)),
-      COUNTRIES.slice(3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `imp:country:${c.code}`)),
-      [Markup.button.callback('В меню', 'home')]
-    ];
+    text = [
+      '🔧 Калькулятор • Шаг 1/7',
+      '',
+      'Введите *марку и модель латиницей* (пример: `BMW X5`, `Toyota Camry`).',
+      'Отправьте текст сообщением — я продолжу.'
+    ].join('\n');
+    s.await_text = 'bm';
+    rows = [[Markup.button.callback('В меню', 'home')]];
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'Markdown' };
   }
 
   if (step === 2) {
-    text += '\nГород доставки:';
+    text = `🔧 Калькулятор • Шаг 2/7${chipsCalc(s)}\n\nВыберите состояние:`;
     rows = [
-      PRESET_CITIES.slice(0,3).map(c => Markup.button.callback(c.t, `imp:dc:${c.k}`)),
-      PRESET_CITIES.slice(3).map(c => Markup.button.callback(c.t, `imp:dc:${c.k}`)),
-      [Markup.button.callback('↩ Назад', 'imp:back'), Markup.button.callback('В меню', 'home')]
+      [Markup.button.callback('Новый', 'calc:cond:new'), Markup.button.callback('С пробегом', 'calc:cond:used')],
+      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('В меню', 'home')]
     ];
+    return { text, markup: Markup.inlineKeyboard(rows) };
   }
 
   if (step === 3) {
-    text += '\nБюджет:';
+    text = `🔧 Калькулятор • Шаг 3/7${chipsCalc(s)}\n\nГород доставки:`;
     rows = [
-      PRESET_BUDGETS.slice(0,2).map(b => Markup.button.callback(b.t, `imp:bud:${b.k}`)),
-      PRESET_BUDGETS.slice(2,4).map(b => Markup.button.callback(b.t, `imp:bud:${b.k}`)),
-      [Markup.button.callback('Укажу сам', 'imp:bud:x')],
-      [Markup.button.callback('↩ Назад', 'imp:back'), Markup.button.callback('В меню', 'home')]
+      [Markup.button.callback('Москва', 'calc:city:msk'), Markup.button.callback('Санкт-Петербург', 'calc:city:spb')],
+      [Markup.button.callback('Указать свой', 'calc:city:oth')],
+      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
+    return { text, markup: Markup.inlineKeyboard(rows) };
   }
 
   if (step === 4) {
-    text += '\nПредпочтения (переключатели):';
-    const on = (cur, val) => cur === val ? '✅' : '□';
+    text = `🔧 Калькулятор • Шаг 4/7${chipsCalc(s)}\n\nСтрана вывоза:`;
     rows = [
-      [Markup.button.callback(`${on(s.prefs?.body,'седан')} Седан`, 'imp:pref:body:седан'),
-       Markup.button.callback(`${on(s.prefs?.body,'кроссовер')} Кросс`, 'imp:pref:body:кроссовер')],
-      [Markup.button.callback(`${on(s.prefs?.transmission,'AT')} КПП AT`, 'imp:pref:gear:AT'),
-       Markup.button.callback(`${on(s.prefs?.transmission,'MT')} КПП MT`, 'imp:pref:gear:MT')],
-      [Markup.button.callback(`${on(s.prefs?.drive,'FWD')} Привод FWD`, 'imp:pref:drive:FWD'),
-       Markup.button.callback(`${on(s.prefs?.drive,'AWD')} Привод AWD`, 'imp:pref:drive:AWD')],
-      [Markup.button.callback(`${on(s.prefs?.fuel,'бензин')} Бензин`, 'imp:pref:fuel:бензин'),
-       Markup.button.callback(`${on(s.prefs?.fuel,'гибрид')} Гибрид`, 'imp:pref:fuel:гибрид'),
-       Markup.button.callback(`${on(s.prefs?.fuel,'электро')} Электро`, 'imp:pref:fuel:электро')],
-      [Markup.button.callback('↩ Назад', 'imp:back'), Markup.button.callback('Далее →', 'imp:next')]
+      COUNTRIES.slice(0,3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
+      COUNTRIES.slice(3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
+      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
+    return { text, markup: Markup.inlineKeyboard(rows) };
   }
 
   if (step === 5) {
-    text += '\nКак связаться?';
+    text = `🔧 Калькулятор • Шаг 5/7${chipsCalc(s)}\n\nДобавить комментарий?`;
     rows = [
-      [Markup.button.callback('Telegram', 'imp:cm:tg'), Markup.button.callback('WhatsApp', 'imp:cm:wa'), Markup.button.callback('Звонок', 'imp:cm:call')],
-      [Markup.button.callback('↩ Назад', 'imp:back'), Markup.button.callback('Далее →', 'imp:next')]
+      [Markup.button.callback('Добавить комментарий', 'calc:comment:add')],
+      [Markup.button.callback('Нет пожеланий', 'calc:comment:none')],
+      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
+    return { text, markup: Markup.inlineKeyboard(rows) };
   }
 
   if (step === 6) {
-    text += '\nПодтвердите телефон (кнопкой ниже).';
-    rows = [
-      [Markup.button.callback('Отправить телефон', 'imp:contact')],
-      [Markup.button.callback('↩ Назад', 'imp:back'), Markup.button.callback('В меню', 'home')]
-    ];
+    text = `📦 Ориентировочная стоимость и сроки${chipsCalc(s)}\n\n` + renderCostBlock(s);
+    rows = [[Markup.button.callback('Далее → Выбор канала связи', 'calc:to_contact')]];
+    return { text, markup: Markup.inlineKeyboard(rows) };
   }
 
-  return { text, markup: Markup.inlineKeyboard(rows) };
+  if (step === 7) {
+    text = `📨 Канал для отправки персонального предложения${chipsCalc(s)}\n\nВыберите удобный канал:`;
+    rows = [
+      [Markup.button.callback('Телефон', 'calc:cm:phone')],
+      [Markup.button.callback('Telegram', 'calc:cm:tg')],
+      [Markup.button.callback('WhatsApp', 'calc:cm:wa')],
+      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('В меню', 'home')]
+    ];
+    return { text, markup: Markup.inlineKeyboard(rows) };
+  }
+
+  return { text, markup: Markup.inlineKeyboard([[Markup.button.callback('В меню', 'home')]]) };
 }
 
-function renderSalonPage(s) {
-  const step = s.step || 1;
-  let text = `🚘 Подбор из салона • Шаг ${step}/5${chips(s)}\n`;
-  let rows = [];
+function renderCostBlock(s) {
+  const c = COST[s.country];
+  const countryTitle = COUNTRIES.find(x => x.code === s.country)?.title || '';
+  const parts = [];
+  if (countryTitle) parts.push(`Стоимость доставки авто из ${countryTitle} — ${fmt(c?.delivery || 0)} ₽.`);
+  if (c?.days) parts.push(`Срок доставки: ~${c.days} дней.`);
+  parts.push(`Услуги компании: ${fmt((c && c.service) || 150000)} ₽.`);
+  parts.push(`Предоплата: 10%.`);
+  parts.push('');
+  parts.push(`Стоимость растаможки зависит от конкретного автомобиля.`);
+  parts.push('');
+  const city = s.city || 'Москве';
+  parts.push(`Давайте подберём для вас ${s.bm || 'авто'} и отправим готовое предложение под ключ в ${city}.`);
+  return parts.join('\n');
+}
 
-  if (step === 1) {
-    text += '\nВаш город:';
-    rows = [
-      PRESET_CITIES.slice(0,3).map(c => Markup.button.callback(c.t, `sal:city:${c.k}`)),
-      PRESET_CITIES.slice(3).map(c => Markup.button.callback(c.t, `sal:city:${c.k}`)),
-      [Markup.button.callback('В меню', 'home')]
-    ];
+// ----------------- Старт -----------------
+bot.start(async (ctx) => {
+  try {
+    const arg = (ctx.message.text.split(' ').slice(1)[0] || '').trim();
+    const s = S.get(ctx.from.id) || {};
+    s.id = ctx.from.id;
+    s.start_param = arg || 'organic';
+    s.utm = parseUTM(arg);
+    resetCalcState(s);
+    S.set(ctx.from.id, s);
+    await rebaseHome(ctx, s);
+  } catch (e) {
+    await notifyAndRebaseHome(ctx, {}, 'Упс, что-то пошло не так. Попробуйте ещё раз.');
+  }
+});
+
+// ----------------- CTA -----------------
+bot.action('home', async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  resetCalcState(s);
+  await rebaseHome(ctx, s);
+});
+
+bot.action('cta:start', async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  resetCalcState(s);
+  s.flow = 'calc';
+  s.step = 1;
+  S.set(ctx.from.id, s);
+  const view = renderCalcPage(s);
+  await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
+});
+
+bot.action('cta:manager', async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  resetCalcState(s);
+  s.flow = 'manager';
+  s.step = 7; // сразу на выбор канала связи
+  const view = renderCalcPage(s);
+  await rebaseMaster(ctx, s, view.text, view.markup);
+});
+
+// ----------------- FAQ -----------------
+bot.action('faq', async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  const m = await ensureMasterMessage(ctx, s);
+  const { text, markup } = renderFaqSections();
+  await safeEdit(ctx, m, text, markup);
+});
+bot.action(/^faq:sec:([^:]+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  const m = await ensureMasterMessage(ctx, s);
+  const secId = ctx.match[1];
+  const { text, markup } = renderFaqSubs(secId);
+  await safeEdit(ctx, m, text, markup);
+});
+bot.action(/^faq:sub:([^:]+):([^:]+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  const m = await ensureMasterMessage(ctx, s);
+  const secId = ctx.match[1], subId = ctx.match[2];
+  const { text, markup } = renderFaqQuestions(secId, subId, 0);
+  await safeEdit(ctx, m, text, markup);
+});
+bot.action(/^faq:list:([^:]+):([^:]+):?(\d+)?$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  const m = await ensureMasterMessage(ctx, s);
+  const secId = ctx.match[1], subId = ctx.match[2], page = Number(ctx.match[3] || 0);
+  const { text, markup } = renderFaqQuestions(secId, subId, page);
+  await safeEdit(ctx, m, text, markup);
+});
+bot.action(/^faq:q:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id) || {};
+  const m = await ensureMasterMessage(ctx, s);
+  const qid = ctx.match[1];
+  const { text, markup, parse_mode } = renderFaqAnswer(qid);
+  await safeEdit(ctx, m, text, markup, parse_mode);
+});
+
+// ----------------- Калькулятор: инлайн-этапы -----------------
+bot.action(/^calc:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = S.get(ctx.from.id); if (!s) return;
+  const [type, a] = ctx.match[1].split(':');
+
+  if (type === 'cond') {
+    s.condition = a; // new | used
+    if (a === 'used') {
+      s.await_text = 'year';
+      await ctx.reply('Введите год выпуска (например: 2019).');
+      return; // не перерисовываем меню
+    } else {
+      s.used_year = null;
+      s.used_mileage = null;
+      s.step = 3;
+    }
   }
 
-  if (step === 2) {
-    text += '\nБюджет:';
-    rows = [
-      PRESET_BUDGETS.slice(0,2).map(b => Markup.button.callback(b.t, `sal:bud:${b.k}`)),
-      PRESET_BUDGETS.slice(2,4).map(b => Markup.button.callback(b.t, `sal:bud:${b.k}`)),
-      [Markup.button.callback('Укажу сам', 'sal:bud:x')],
-      [Markup.button.callback('↩ Назад', 'sal:back'), Markup.button.callback('Вперёд →', 'sal:next')]
-    ];
+  if (type === 'city') {
+    if (a === 'msk') { s.city = 'Москва'; s.step = 4; }
+    else if (a === 'spb') { s.city = 'Санкт-Петербург'; s.step = 4; }
+    else if (a === 'oth') {
+      s.await_text = 'city_custom';
+      await ctx.reply('Введите город доставки (только буквы, пробелы и дефисы).');
+      return; // ждём ввод
+    }
   }
 
-  if (step === 3) {
-    text += '\nМини-предпочтения:';
-    const on = (cur, val) => cur === val ? '✅' : '□';
-    rows = [
-      [Markup.button.callback(`${on(s.prefs?.body,'седан')} Седан`, 'sal:pref:body:седан'),
-       Markup.button.callback(`${on(s.prefs?.body,'кроссовер')} Кросс`, 'sal:pref:body:кроссовер')],
-      [Markup.button.callback(`${on(s.prefs?.fuel,'бензин')} Бензин`, 'sal:pref:fuel:бензин'),
-       Markup.button.callback(`${on(s.prefs?.fuel,'гибрид')} Гибрид`, 'sal:pref:fuel:гибрид')],
-      [Markup.button.callback('↩ Назад', 'sal:back'), Markup.button.callback('Далее →', 'sal:next')]
-    ];
+  if (type === 'country') {
+    s.country = a; // EU/KR/CN/US/AE
   }
 
-  if (step === 4) {
-    text += '\nКак связаться?';
-    rows = [
-      [Markup.button.callback('Telegram', 'sal:cm:tg'), Markup.button.callback('WhatsApp', 'sal:cm:wa'), Markup.button.callback('Звонок', 'sal:cm:call')],
-      [Markup.button.callback('↩ Назад', 'sal:back'), Markup.button.callback('Далее →', 'sal:next')]
-    ];
+  if (type === 'comment') {
+    if (a === 'add') {
+      s.await_text = 'comment';
+      await ctx.reply('Введите комментарий одним сообщением.');
+      return; // ждём ввод
+    }
+    if (a === 'none') {
+      s.comment = '';
+      s.step = 6;
+    }
   }
 
-  if (step === 5) {
-    text += '\nПодтвердите телефон:';
-    rows = [
-      [Markup.button.callback('Отправить телефон', 'sal:contact')],
-      [Markup.button.callback('↩ Назад', 'sal:back'), Markup.button.callback('В меню', 'home')]
-    ];
+  if (type === 'to_contact') {
+    s.step = 7;
   }
 
-  return { text, markup: Markup.inlineKeyboard(rows) };
+  if (type === 'cm') {
+    s.contact_method = a; // phone | tg | wa
+    if (a === 'phone' || a === 'wa') {
+      await askContact(ctx, s);
+      return; // ждём контакт
+    }
+    if (a === 'tg') {
+      if (ctx.from.username) {
+        s.tg_username = ctx.from.username;
+        await finalizeAndSend(ctx, s, { sendNew: true });
+        return;
+      } else {
+        s.await_text = 'tg_username';
+        await ctx.reply('Укажите ваш Telegram @username (например: @ivan_ivanov).');
+        return; // ждём ввод
+      }
+    }
+  }
+
+  if (type === 'back') {
+    if (s.step > 1) s.step = s.step - 1;
+  }
+  if (type === 'next') {
+    if (s.step < 7) s.step = s.step + 1;
+  }
+
+  const view = renderCalcPage(s);
+  const m = await ensureMasterMessage(ctx, s);
+  await safeEdit(ctx, m, view.text, view.markup, view.parse_mode);
+});
+
+// ----------------- Тексты от пользователя -----------------
+bot.on('text', async (ctx) => {
+  const s = S.get(ctx.from.id);
+  if (!s || !s.await_text) return;
+  const t = ctx.message.text.trim();
+
+  if (s.await_text === 'bm') {
+    if (!validateBrandModel(t)) {
+      await ctx.reply('Неверный формат. Введите марку и модель латиницей (пример: BMW X5).');
+      return; // меню не показываем
+    }
+    s.bm = t.toUpperCase();
+    s.await_text = null;
+    s.step = 2;
+  } else if (s.await_text === 'year') {
+    const y = parseYear(t);
+    if (!y) {
+      await ctx.reply('Неверный год. Введите 4 цифры, например: 2018.');
+      return;
+    }
+    s.used_year = y;
+    s.await_text = 'mileage';
+    await ctx.reply('Введите ограничение пробега (например: "до 50 000 км").');
+    return; // ждём пробег, меню не показываем
+  } else if (s.await_text === 'mileage') {
+    const m = parseMileage(t);
+    if (!m) {
+      await ctx.reply('Неверный пробег. Пример: "до 50 000 км".');
+      return;
+    }
+    s.used_mileage = m;
+    s.await_text = null;
+    s.step = 3;
+  } else if (s.await_text === 'city_custom') {
+    const city = normalizeCityOrNull(t);
+    if (!city) {
+      await ctx.reply('Неверный формат города. Используйте только буквы, пробелы и дефисы.');
+      return;
+    }
+    s.city = city;
+    s.await_text = null;
+    s.step = 4;
+  } else if (s.await_text === 'comment') {
+    s.comment = t.slice(0, 800);
+    s.await_text = null;
+    s.step = 6;
+
+    // «Просто сообщение» с расчётом
+    await ctx.reply('📦 Ориентировочная стоимость и сроки\n\n' + renderCostBlock(s));
+
+    // сразу следующий этап — выбор канала
+    s.step = 7;
+    const v = renderCalcPage(s);
+    await rebaseMaster(ctx, s, v.text, v.markup);
+    return;
+  } else if (s.await_text === 'tg_username') {
+    const u = t.replace(/^@/, '');
+    if (!/^[A-Za-z0-9_]{5,}$/.test(u)) {
+      await ctx.reply('Неверный @username. Пример: @ivan_ivanov');
+      return;
+    }
+    s.tg_username = u;
+    s.await_text = null;
+    await finalizeAndSend(ctx, s, { sendNew: true });
+    return;
+  }
+
+  // после валидного ввода — переносим меню вниз
+  const view = renderCalcPage(s);
+  await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
+});
+
+// ----------------- Приём контакта (телефон) -----------------
+bot.on('contact', async (ctx) => {
+  const s = S.get(ctx.from.id);
+  if (!s) return;
+  const raw = String(ctx.message.contact.phone_number || '').replace(/[^\d+]/g, '');
+  const phoneE164 = raw.startsWith('+') ? raw : (raw.startsWith('8') && raw.length === 11 ? '+7' + raw.slice(1) : '+' + raw);
+  s.phone = phoneE164;
+  s.contact_name = `${ctx.message.contact.first_name || ''} ${ctx.message.contact.last_name || ''}`.trim() || ctx.from.first_name || '';
+  await ctx.reply('Спасибо! Контакт получен ✅', Markup.removeKeyboard());
+
+  await finalizeAndSend(ctx, s, { sendNew: true });
+});
+
+// ----------------- Финализация -----------------
+async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
+  try {
+    if (s.contact_method === 'tg' && !s.tg_username && !ctx.from.username) {
+      s.await_text = 'tg_username';
+      await ctx.reply('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanov).');
+      return;
+    }
+    if ((s.contact_method === 'phone' || s.contact_method === 'wa') && !s.phone) {
+      await askContact(ctx, s);
+      return;
+    }
+
+    const payload = buildPayloadFromState(ctx, s);
+    const responsible_id = nextResponsible();
+    queueAmoDelivery({ payload, responsible_id });
+
+    // Спасибо-экран
+    const lines = [
+      '🎉 Спасибо за обращение! Ожидайте получения вашего персонального предложения.',
+      '',
+      '— Пока ждёте, подпишитесь на АВТОNEWS, чтобы быть в курсе самых свежих новостей.',
+      '— Горячие предложения авто в наличии/в пути — в нашем каталоге.',
+      '— Бесплатно проверить историю авто по VIN можно в нашем сервисе.'
+    ].join('\n');
+
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.url('Подписаться на AUTONEWS', NEWS_CHANNEL_URL)],
+      [Markup.button.url('Каталог авто', CATALOG_URL)],
+      [Markup.button.url('Проверка по VIN', VIN_BOT_URL)],
+      [Markup.button.callback('🔁 Новый расчёт', 'cta:start'), Markup.button.callback('🏠 В меню', 'home')]
+    ]);
+
+    if (sendNew) await ctx.reply(lines, kb);
+    else {
+      const m = await ensureMasterMessage(ctx, s);
+      await safeEdit(ctx, m, lines, kb);
+    }
+
+    resetCalcState(s);
+  } catch (e) {
+    LOG.error(e, 'finalize error');
+    await notifyAndRebaseHome(ctx, s, 'Не получилось отправить заявку сразу. Мы повторим попытку автоматически.');
+  }
+}
+
+function buildPayloadFromState(ctx, s) {
+  return {
+    lead_uid: s.lead_uid || ulid(),
+    created_at: nowISO(),
+    type: s.flow || 'calc',
+    source: { start_param: s.start_param || 'organic', utm: s.utm || {} },
+    contact: {
+      phone_e164: s.phone || null,
+      tg_username: s.tg_username || ctx.from.username || '',
+      name: s.contact_name || `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim()
+    },
+    bm: s.bm || '',
+    condition: s.condition || '',
+    used_year: s.used_year || null,
+    used_mileage: s.used_mileage || null,
+    city: s.city || '',
+    country: s.country || '',
+    comment: s.comment || '',
+    consent: { accepted: true, version: '2025-09-01', ts: nowISO() }
+  };
+}
+
+function queueAmoDelivery({ payload, responsible_id }) {
+  outbox.push({
+    id: ulid(),
+    t: 'amo.calc',
+    payload,
+    responsible_id: responsible_id || null,
+    attempts: 0,
+    next_at: Date.now()
+  });
+  saveJSON(OUTBOX_PATH, outbox);
+}
+setInterval(processOutboxTick, 2000);
+
+async function processOutboxTick() {
+  const now = Date.now();
+  for (const job of [...outbox]) {
+    if (job.next_at > now) continue;
+    try {
+      if (job.t === 'amo.calc') {
+        await deliverCalcToAmo(job.payload, job.responsible_id);
+      }
+      const idx = outbox.findIndex(x => x.id === job.id);
+      if (idx >= 0) outbox.splice(idx, 1);
+      saveJSON(OUTBOX_PATH, outbox);
+    } catch (e) {
+      job.attempts += 1;
+      const backoffMs = attemptBackoff(job.attempts);
+      job.next_at = Date.now() + backoffMs;
+      saveJSON(OUTBOX_PATH, outbox);
+      if (job.attempts === 3 && ADMIN_CHAT_ID) {
+        try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, `⚠️ amoCRM недоступна, повторная попытка через ${Math.round(backoffMs/1000)}с`); } catch {}
+      }
+    }
+  }
+}
+function attemptBackoff(n) {
+  if (n <= 1) return 60 * 1000;
+  if (n === 2) return 5 * 60 * 1000;
+  if (n === 3) return 15 * 60 * 1000;
+  if (n === 4) return 60 * 60 * 1000;
+  return 6 * 60 * 60 * 1000;
+}
+
+async function deliverCalcToAmo(payload, responsible_id) {
+  const contact_id = await amo.createOrUpdateContact({
+    phone_e164: payload.contact.phone_e164 || null,
+    name: payload.contact.name,
+    tg_username: payload.contact.tg_username
+  });
+
+  const lead_id = await amo.createLeadCalc({ payload, responsible_id });
+
+  await amo.linkContactToLead(contact_id, lead_id);
+
+  await amo.addNote(lead_id, calcSummary(payload));
+
+  const completeAt = Date.now() + 15 * 60 * 1000;
+  await amo.addTask(lead_id, 'Перезвонить/написать клиенту по калькулятору', completeAt);
+}
+
+function calcSummary(p) {
+  const countryTitle = COUNTRIES.find(x => x.code === p.country)?.title || p.country || '-';
+  const c = COST[p.country] || {};
+  const lines = [
+    `Калькулятор: ${p.bm || '-'}`,
+    `Состояние: ${p.condition === 'new' ? 'Новый' : (p.condition === 'used' ? 'С пробегом' : '-')}`,
+    ...(p.condition === 'used' ? [
+      `Год: ${p.used_year || '-'}`,
+      `Пробег: до ${p.used_mileage ? fmt(p.used_mileage) : '-'} км`
+    ] : []),
+    `Город доставки: ${p.city || '-'}`,
+    `Страна вывоза: ${countryTitle}`,
+    `Комментарий: ${p.comment ? 'есть' : 'нет'}`,
+    '',
+    `Ориентировочно: доставка ${c.delivery ? fmt(c.delivery) + ' ₽' : '-'}, срок ~${c.days || '?'} дн., услуги ${c.service ? fmt(c.service) + ' ₽' : '-'}.`,
+    'Растаможка зависит от авто.',
+    '',
+    `Канал связи: ${p.contact?.phone_e164 ? 'Телефон/WhatsApp' : (p.contact?.tg_username ? '@' + p.contact.tg_username : '-')}`,
+    `Источник: ${p.source?.start_param || '—'}`
+  ];
+  return lines.join('\n');
 }
 
 // ----------------- FAQ рендеры -----------------
@@ -585,482 +968,25 @@ function renderFaqAnswer(qid) {
   return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'Markdown' };
 }
 
-// --------- Управление «живым» сообщением ---------
-async function ensureMasterMessage(ctx, s) {
-  if (s.master && s.master.chat_id && s.master.message_id) return s.master;
-  const m = await ctx.reply('Загрузка меню…', kbMain());
-  s.master = { chat_id: m.chat.id, message_id: m.message_id };
-  return s.master;
-}
-async function renderHome(ctx, s) {
-  const m = await ensureMasterMessage(ctx, s);
-  await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, homeText(), kbMain());
-}
-async function deleteMasterIfAny(ctx, s) {
-  if (s.master && s.master.chat_id && s.master.message_id) {
-    try { await ctx.telegram.deleteMessage(s.master.chat_id, s.master.message_id); } catch (e) {}
-    s.master = null;
-  }
-}
-async function tryDeleteCurrentCallbackMessage(ctx, s) {
-  const msg = ctx.callbackQuery && ctx.callbackQuery.message;
-  if (!msg) return;
-  if (!s.master || msg.message_id !== s.master.message_id) {
-    try { await ctx.telegram.deleteMessage(msg.chat.id, msg.message_id); } catch (e) {}
-  }
-}
-async function safeEdit(ctx, m, text, markup, parse_mode) {
-  try {
-    await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, {
-      ...markup,
-      ...(parse_mode ? { parse_mode } : {}),
-      disable_web_page_preview: true
-    });
-  } catch (e) {
-    if (!String(e).includes('message is not modified')) {
-      LOG.warn({ e: String(e) }, 'editMessageText warn');
-    }
-  }
-}
-// пересоздание «живого» меню ниже пользовательского ввода
-async function rebaseMaster(ctx, s, text, markup, parse_mode) {
-  await deleteMasterIfAny(ctx, s);
-  const m = await ctx.reply(text, {
-    ...markup,
-    ...(parse_mode ? { parse_mode } : {}),
-    disable_web_page_preview: true
-  });
-  s.master = { chat_id: m.chat.id, message_id: m.message_id };
-  return s.master;
-}
-// универсальная обёртка для служебных сообщений + главного меню
-async function notifyAndRebaseHome(ctx, s, text, extra = {}) {
-  await ctx.reply(text, extra);
-  await rebaseHome(ctx, s);
-}
-
-// ----------------- /start -----------------
-bot.start(async (ctx) => {
-  try {
-    const arg = (ctx.message.text.split(' ').slice(1)[0] || '').trim(); // deep-link
-    const s = S.get(ctx.from.id) || {};
-    s.id = ctx.from.id;
-    s.start_param = arg || 'organic';
-    s.utm = parseUTM(arg);
-    s.flow = null;
-    s.step = 0;
-    s.lead_uid = ulid();
-    S.set(ctx.from.id, s);
-
-    // try { await ctx.replyWithVideoNote({ source: path.join(__dirname, 'assets/welcome.mp4') }); } catch {}
-
-    await renderHome(ctx, s);
-  } catch (e) {
-    LOG.error(e);
-    await notifyAndRebaseHome(ctx, {}, 'Упс, что-то пошло не так. Попробуйте ещё раз.');
-  }
-});
-
-// ----------------- Главные экшены -----------------
-bot.action('home', async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  await tryDeleteCurrentCallbackMessage(ctx, s);
+// ----------------- Вспомогательное -----------------
+function resetCalcState(s) {
   s.flow = null;
   s.step = 0;
-  await renderHome(ctx, s);
-});
-bot.action('faq', async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  await tryDeleteCurrentCallbackMessage(ctx, s);
-  const m = await ensureMasterMessage(ctx, s);
-  const { text, markup } = renderFaqSections();
-  await safeEdit(ctx, m, text, markup);
-});
-bot.action(/^faq:sec:([^:]+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  const m = await ensureMasterMessage(ctx, s);
-  const secId = ctx.match[1];
-  const { text, markup } = renderFaqSubs(secId);
-  await safeEdit(ctx, m, text, markup);
-});
-bot.action(/^faq:sub:([^:]+):([^:]+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  const m = await ensureMasterMessage(ctx, s);
-  const secId = ctx.match[1], subId = ctx.match[2];
-  const { text, markup } = renderFaqQuestions(secId, subId, 0);
-  await safeEdit(ctx, m, text, markup);
-});
-bot.action(/^faq:list:([^:]+):([^:]+):?(\d+)?$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  const m = await ensureMasterMessage(ctx, s);
-  const secId = ctx.match[1], subId = ctx.match[2], page = Number(ctx.match[3] || 0);
-  const { text, markup } = renderFaqQuestions(secId, subId, page);
-  await safeEdit(ctx, m, text, markup);
-});
-bot.action(/^faq:q:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  const m = await ensureMasterMessage(ctx, s);
-  const qid = ctx.match[1];
-  const { text, markup, parse_mode } = renderFaqAnswer(qid);
-  await safeEdit(ctx, m, text, markup, parse_mode);
-});
-
-bot.action('flow:import', async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  await tryDeleteCurrentCallbackMessage(ctx, s);
-
-  s.flow = 'import';
-  s.step = 1;
-  s.country = null;
-  s.delivery_city = null;
-  s.budget = null;
-  s.prefs = {};
   s.await_text = null;
-  S.set(ctx.from.id, s);
-  const m = await ensureMasterMessage(ctx, s);
-  const { text, markup } = renderImportPage(s);
-  await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, markup);
-});
-bot.action('flow:salon', async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id) || {};
-  await tryDeleteCurrentCallbackMessage(ctx, s);
-
-  s.flow = 'salon';
-  s.step = 1;
+  s.lead_uid = ulid();
+  s.bm = null;
+  s.condition = null;
+  s.used_year = null;
+  s.used_mileage = null;
   s.city = null;
-  s.budget = null;
-  s.prefs = {};
-  s.await_text = null;
-  S.set(ctx.from.id, s);
-  const m = await ensureMasterMessage(ctx, s);
-  const { text, markup } = renderSalonPage(s);
-  await ctx.telegram.editMessageText(m.chat_id, m.message_id, undefined, text, markup);
-});
-
-// --------- Импорт: шаги ---------
-bot.action(/imp:(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id); if (!s) return;
-
-  const [type, a, b] = ctx.match[1].split(':');
-  if (type === 'country') { s.country = a; s.step = 2; }
-
-  if (type === 'dc') {
-    const found = PRESET_CITIES.find(x => x.k === a);
-    if (found) {
-      if (a === 'oth') {
-        s.await_text = 'delivery_city';
-        await ctx.reply('Введите город доставки (только буквы, пробелы и дефисы). Пример: "Ростов-на-Дону"');
-      } else {
-        s.delivery_city = found.t; s.step = 3;
-      }
-    }
-  }
-
-  if (type === 'bud') {
-    const preset = PRESET_BUDGETS.find(x => x.k === a);
-    if (preset) {
-      if (preset.custom) {
-        s.await_text = 'budget_custom';
-        await ctx.reply('Введите бюджет числом или диапазоном. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
-      } else {
-        s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 4;
-      }
-    }
-  }
-
-  if (type === 'pref') {
-    const [field, val] = [a, b];
-    s.prefs = s.prefs || {};
-    s.prefs[field] = (s.prefs[field] === val) ? null : val;
-  }
-
-  if (type === 'cm') { s.contact_method = a; }
-  if (type === 'next') { s.step = Math.min(6, (s.step || 1) + 1); }
-  if (type === 'back') { s.step = Math.max(1, (s.step || 1) - 1); }
-  if (type === 'contact') { await askContact(ctx, s); }
-
-  const m = await ensureMasterMessage(ctx, s);
-  const { text, markup } = renderImportPage(s);
-  await safeEdit(ctx, m, text, markup);
-});
-
-// --------- Салон: шаги ---------
-bot.action(/sal:(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const s = S.get(ctx.from.id); if (!s) return;
-
-  const [type, a, b] = ctx.match[1].split(':');
-  if (type === 'city') {
-    const found = PRESET_CITIES.find(x => x.k === a);
-    if (found) {
-      if (a === 'oth') {
-        s.await_text = 'city';
-        await ctx.reply('Введите ваш город (только буквы, пробелы и дефисы). Пример: "Санкт-Петербург"');
-      } else {
-        s.city = found.t; s.step = 2;
-      }
-    }
-  }
-
-  if (type === 'bud') {
-    const preset = PRESET_BUDGETS.find(x => x.k === a);
-    if (preset) {
-      if (preset.custom) {
-        s.await_text = 'budget_custom';
-        await ctx.reply('Введите бюджет числом или диапазоном. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
-      } else {
-        s.budget = { min: preset.min, max: preset.max, currency: 'RUB' }; s.step = 3;
-      }
-    }
-  }
-
-  if (type === 'pref') {
-    const [field, val] = [a, b];
-    s.prefs = s.prefs || {};
-    s.prefs[field] = (s.prefs[field] === val) ? null : val;
-  }
-
-  if (type === 'cm') { s.contact_method = a; }
-  if (type === 'next') { s.step = Math.min(5, (s.step || 1) + 1); }
-  if (type === 'back') { s.step = Math.max(1, (s.step || 1) - 1); }
-  if (type === 'contact') { await askContact(ctx, s); }
-
-  const m = await ensureMasterMessage(ctx, s);
-  const { text, markup } = renderSalonPage(s);
-  await safeEdit(ctx, m, text, markup);
-});
-
-// --------- Приём контакта ---------
-bot.on('contact', async (ctx) => {
-  const s = S.get(ctx.from.id);
-  if (!s) return;
-
-  const raw = String(ctx.message.contact.phone_number || '').replace(/[^\d+]/g, '');
-  const phoneE164 = raw.startsWith('+') ? raw : (raw.startsWith('8') && raw.length === 11 ? '+7' + raw.slice(1) : '+' + raw);
-  s.phone = phoneE164;
-  s.contact_name = `${ctx.message.contact.first_name || ''} ${ctx.message.contact.last_name || ''}`.trim() || ctx.from.first_name || '';
-
-  await ctx.reply('Спасибо! Контакт получен ✅', Markup.removeKeyboard());
-  await deleteMasterIfAny(ctx, s);
-  await finalizeAndSend(ctx, s, { sendNew: true });
-});
-
-// --------- Приём обычного текста (город/бюджет custom, с ребейзом меню) ---------
-bot.on('text', async (ctx) => {
-  const s = S.get(ctx.from.id);
-  if (!s || !s.await_text) return;
-  const t = ctx.message.text.trim();
-
-  if (s.await_text === 'delivery_city') {
-    const norm = normalizeCityOrNull(t);
-    if (!norm) {
-      await notifyAndRebaseHome(ctx, s, 'Неверный формат города. Используйте только буквы, пробелы и дефисы. Пример: "Ростов-на-Дону"');
-      return;
-    }
-    s.delivery_city = norm;
-    s.await_text = null;
-    s.step = 3;
-  } else if (s.await_text === 'city') {
-    const norm = normalizeCityOrNull(t);
-    if (!norm) {
-      await notifyAndRebaseHome(ctx, s, 'Неверный формат города. Используйте только буквы, пробелы и дефисы. Пример: "Санкт-Петербург"');
-      return;
-    }
-    s.city = norm;
-    s.await_text = null;
-    s.step = 2;
-  } else if (s.await_text === 'budget_custom') {
-    const parsed = parseBudgetInput(t);
-    if (!parsed) {
-      await notifyAndRebaseHome(ctx, s, 'Неверный формат бюджета. Введите число или диапазон. Примеры: "2 000 000", "2.5 млн", "2–3 млн"');
-      return;
-    }
-    s.budget = parsed;
-    s.await_text = null;
-    s.step = s.flow === 'import' ? 4 : 3;
-  }
-
-  // Пересоздаём «живое» меню НИЖЕ сообщения пользователя
-  const view = s.flow === 'import' ? renderImportPage(s) : renderSalonPage(s);
-  await rebaseMaster(ctx, s, view.text, view.markup);
-});
-
-// --------- Финализация и отправка в amoCRM ---------
-async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
-  try {
-    if (!s.phone) {
-      await notifyAndRebaseHome(ctx, s, 'Нужно подтвердить телефон, нажмите «Отправить телефон».');
-      return;
-    }
-
-    const last = dedup[s.phone];
-    if (last && dayjs().diff(dayjs(last), 'day') < 30) {
-      LOG.info({ phone: s.phone }, 'dedup: recent');
-    }
-    dedup[s.phone] = nowISO(); saveJSON(DEDUP_PATH, dedup);
-
-    const payload = buildPayloadFromState(ctx, s);
-    const responsible_id = nextResponsible();
-    queueAmoDelivery({ payload, responsible_id });
-
-    const text = [
-      '✅ Заявка отправлена! Эксперт свяжется в ближайшее время (обычно до 15 минут).',
-      'Хотите оформить ещё один расчёт или вернуться в меню?'
-    ].join('\n');
-    const kb = Markup.inlineKeyboard([
-      [Markup.button.callback('Ещё один расчёт', 'flow:import')],
-      [Markup.button.callback('В меню', 'home')],
-      [Markup.button.callback('Ответы на вопросы', 'faq')]
-    ]);
-
-    if (sendNew) await ctx.reply(text, kb);
-    else {
-      const m = await ensureMasterMessage(ctx, s);
-      await safeEdit(ctx, m, text, kb);
-    }
-
-    s.step = 0;
-  } catch (e) {
-    LOG.error(e, 'finalize error');
-    // после сообщения об ошибке — пересоздать Главное меню НИЖЕ
-    await notifyAndRebaseHome(ctx, s, 'Не получилось отправить заявку сразу. Мы повторим попытку автоматически.');
-  }
+  s.country = null;
+  s.comment = null;
+  s.contact_method = null;
+  s.phone = null;
+  s.tg_username = null;
+  s.contact_name = null;
 }
 
-function buildPayloadFromState(ctx, s) {
-  return {
-    lead_uid: s.lead_uid || ulid(),
-    created_at: nowISO(),
-    flow: s.flow,
-    source: { start_param: s.start_param || 'organic', utm: s.utm || {} },
-    contact: {
-      phone_e164: s.phone,
-      tg_username: ctx.from.username || '',
-      name: s.contact_name || `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim()
-    },
-    geo: {
-      city: s.city || null,
-      delivery_city: s.delivery_city || null
-    },
-    budget: s.budget || null,
-    prefs: {
-      country: s.country || null,
-      body: s.prefs?.body || null,
-      fuel: s.prefs?.fuel || null,
-      transmission: s.prefs?.transmission || null,
-      drive: s.prefs?.drive || null
-    },
-    consent: {
-      accepted: true,
-      version: '2025-09-01',
-      ts: nowISO()
-    }
-  };
-}
-
-// ----------------- Очередь доставки в amoCRM -----------------
-function queueAmoDelivery({ payload, responsible_id }) {
-  outbox.push({
-    id: ulid(),
-    t: 'amo.lead',
-    payload,
-    responsible_id: responsible_id || null,
-    attempts: 0,
-    next_at: Date.now()
-  });
-  saveJSON(OUTBOX_PATH, outbox);
-}
-setInterval(processOutboxTick, 2000);
-
-async function processOutboxTick() {
-  const now = Date.now();
-  for (const job of [...outbox]) {
-    if (job.next_at > now) continue;
-    try {
-      if (job.t === 'amo.lead') {
-        await deliverLeadToAmo(job.payload, job.responsible_id);
-      }
-      const idx = outbox.findIndex(x => x.id === job.id);
-      if (idx >= 0) outbox.splice(idx, 1);
-      saveJSON(OUTBOX_PATH, outbox);
-    } catch (e) {
-      job.attempts += 1;
-      const backoffMs = attemptBackoff(job.attempts);
-      job.next_at = Date.now() + backoffMs;
-      saveJSON(OUTBOX_PATH, outbox);
-      LOG.error({ err: String(e), attempts: job.attempts }, 'Outbox retry scheduled');
-      if (job.attempts === 3 && ADMIN_CHAT_ID) {
-        try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, `⚠️ amoCRM недоступна, повторная попытка через ${Math.round(backoffMs/1000)}с`); } catch {}
-      }
-    }
-  }
-}
-function attemptBackoff(n) {
-  if (n <= 1) return 60 * 1000;
-  if (n === 2) return 5 * 60 * 1000;
-  if (n === 3) return 15 * 60 * 1000;
-  if (n === 4) return 60 * 60 * 1000;
-  return 6 * 60 * 60 * 1000;
-}
-async function deliverLeadToAmo(payload, responsible_id) {
-  const { contact, flow, prefs, source, geo, budget, consent } = payload;
-
-  const contact_id = await amo.createOrUpdateContact({
-    phone_e164: contact.phone_e164,
-    name: contact.name,
-    tg_username: contact.tg_username
-  });
-
-  const lead_id = await amo.createLead({
-    flow,
-    country: prefs.country,
-    delivery_city: geo.delivery_city,
-    city: geo.city,
-    budget,
-    prefs,
-    start_param: source.start_param,
-    utm: source.utm,
-    consent,
-    responsible_id
-  });
-
-  await amo.linkContactToLead(contact_id, lead_id);
-
-  const completeAt = Date.now() + 15 * 60 * 1000;
-  await amo.addTask(lead_id, 'Первичный контакт с клиентом', completeAt);
-  await amo.addNote(lead_id, leadSummary(payload));
-
-  LOG.info({ lead_id, contact_id }, 'amo: lead created');
-}
-function leadSummary(p) {
-  const parts = [];
-  if (p.flow === 'import') {
-    parts.push(`Импорт: ${p.prefs.country || '-'}`);
-    parts.push(`Доставка: ${p.geo.delivery_city || '-'}`);
-  } else {
-    parts.push(`Салон: ${p.geo.city || '-'}`);
-  }
-  parts.push(`Бюджет: ${humanBudget(p.budget)}`);
-  if (p.prefs) {
-    if (p.prefs.body) parts.push(`Кузов: ${p.prefs.body}`);
-    if (p.prefs.transmission) parts.push(`КПП: ${p.prefs.transmission}`);
-    if (p.prefs.drive) parts.push(`Привод: ${p.prefs.drive}`);
-    if (p.prefs.fuel) parts.push(`Топливо: ${p.prefs.fuel}`);
-  }
-  parts.push(`Источник: ${p.source.start_param || '—'}`);
-  return parts.join('\n');
-}
-
-// --------- Round-robin ответственный ---------
 function nextResponsible() {
   if (!RESPONSIBLES.length) return null;
   const idx = rr.i % RESPONSIBLES.length;
@@ -1069,7 +995,6 @@ function nextResponsible() {
   return RESPONSIBLES[idx];
 }
 
-// --------- Запрос телефона (ПДн) ---------
 async function askContact(ctx, s) {
   await ctx.reply(
     'Нажимая кнопку ниже, вы соглашаетесь на обработку персональных данных и обратную связь. Политика: https://example.com/privacy',
@@ -1079,7 +1004,7 @@ async function askContact(ctx, s) {
 
 // ----------------- Запуск -----------------
 bot.launch().then(() => {
-  LOG.info('LeadBot started');
+  LOG.info('LeadBot 2.0.1 started');
 }).catch(e => {
   LOG.error(e, 'bot.launch error');
   process.exit(1);
