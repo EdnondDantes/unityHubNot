@@ -6,6 +6,7 @@ const {
   MSG_ASK_CONDITION,
   MSG_CUSTOMS_NOTE,
   MSG_THANKS_SERVICES,
+  mdv2, // helper для экранирования Markdown-V2
 } = require('./messages');
 
 require('dotenv').config();
@@ -341,6 +342,7 @@ bot.use((ctx, next) => {
 
 const sendHTML = (chatId, text, extra = {}) =>
   bot.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+
 async function deleteMasterIfAny(ctx, s) {
   if (s.master?.chat_id && s.master?.message_id) {
     try { await ctx.telegram.deleteMessage(s.master.chat_id, s.master.message_id); } catch {}
@@ -371,22 +373,17 @@ async function rebaseMaster(ctx, s, text, markup, parse_mode) {
   return s.master;
 }
 function homeText() {
-  return [
-    '👋 Официальный бот Unity Auto.',
-    'Здесь вы можете запустить расчёт доставки/подбора, связаться с менеджером или посмотреть ответы на популярные вопросы.',
-    '',
-    'Выберите действие ниже:'
-  ].join('\n');
+  return MSG_CALC_INTRO; // Markdown-V2 интро
 }
 function kbHome() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🚀 Начать', 'cta:start')],
     [Markup.button.callback('👨‍💼 Связаться с менеджером', 'cta:manager')],
-    [Markup.button.callback('❓ Ответы на популярные вопросы', 'faq')]
+    // [Markup.button.callback('❓ Ответы на популярные вопросы', 'faq')]
   ]);
 }
 async function rebaseHome(ctx, s) {
-  await rebaseMaster(ctx, s, homeText(), kbHome());
+  await rebaseMaster(ctx, s, homeText(), kbHome(), 'MarkdownV2');
 }
 async function notifyAndRebaseHome(ctx, s, text, extra = {}) {
   await ctx.reply(text, extra);
@@ -396,98 +393,102 @@ async function notifyAndRebaseHome(ctx, s, text, extra = {}) {
 // ----------------- Рендеры калькулятора -----------------
 function chipsCalc(s) {
   const arr = [];
-  if (s.bm) arr.push(`Модель: ${s.bm}`);
-  if (s.condition === 'new') arr.push('Состояние: Новый');
+  if (s.bm) arr.push(mdv2.esc(`Модель: ${s.bm}`));
+  if (s.condition === 'new') arr.push(mdv2.esc('Состояние: Новый'));
   if (s.condition === 'used') {
-    arr.push('Состояние: С пробегом');
-    if (s.used_year) arr.push(`Год: ${s.used_year}`);
-    if (s.used_mileage) arr.push(`Пробег: до ${fmt(s.used_mileage)} км`);
+    arr.push(mdv2.esc('Состояние: С пробегом'));
+    if (s.used_year) arr.push(mdv2.esc(`Год: ${s.used_year}`));
+    if (s.used_mileage) arr.push(mdv2.esc(`Пробег: до ${fmt(s.used_mileage)} км`));
   }
-  if (s.city) arr.push(`Доставка: ${s.city}`);
+  if (s.city) arr.push(mdv2.esc(`Доставка: ${s.city}`));
   if (s.country) {
     const ct = COUNTRIES.find(x => x.code === s.country);
-    if (ct) arr.push(`Страна: ${ct.flag} ${ct.title}`);
+    if (ct) arr.push(mdv2.esc(`Страна: ${ct.flag} ${ct.title}`));
   }
-  if (s.comment) arr.push('Комментарий: есть');
-  if (s.await_text === 'bm') arr.push('Введите марку/модель латиницей…');
-  if (s.await_text === 'year') arr.push('Введите год выпуска…');
-  if (s.await_text === 'mileage') arr.push('Введите ограничение пробега…');
-  if (s.await_text === 'city_custom') arr.push('Введите город доставки…');
-  if (s.await_text === 'comment') arr.push('Введите комментарий…');
+  if (s.comment) arr.push(mdv2.esc('Комментарий: есть'));
+  if (s.await_text === 'bm') arr.push(mdv2.esc('Введите марку/модель латиницей…'));
+  if (s.await_text === 'year') arr.push(mdv2.esc('Введите год выпуска…'));
+  if (s.await_text === 'mileage') arr.push(mdv2.esc('Введите ограничение пробега…'));
+  if (s.await_text === 'city_custom') arr.push(mdv2.esc('Введите город доставки…'));
+  if (s.await_text === 'comment') arr.push(mdv2.esc('Введите комментарий…'));
   return arr.length ? `\n\n${arr.map(x => `• ${x}`).join('\n')}` : '';
 }
 
 function renderCalcPage(s) {
   const step = s.step || 1;
-  let text = `🔧 Калькулятор • Шаг ${step}/7${chipsCalc(s)}`;
+  let text = mdv2.esc(`🔧 Калькулятор • Шаг ${step}/7`) + `${chipsCalc(s)}`;
   let rows = [];
 
   if (step === 1) {
     text = [
-      '🔧 Калькулятор • Шаг 1/7',
+      mdv2.esc('🔧 Калькулятор • Шаг 1/7'),
       '',
-      'Введите *марку и модель латиницей* (пример: `BMW X5`, `Toyota Camry`).',
-      'Отправьте текст сообщением — я продолжу.'
+      MSG_QA_INTRO,
+      '',
+      MSG_ASK_MAKE_MODEL
     ].join('\n');
     s.await_text = 'bm';
     rows = [[Markup.button.callback('В меню', 'home')]];
-    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'Markdown' };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 2) {
-    text = `🔧 Калькулятор • Шаг 2/7${chipsCalc(s)}\n\nВыберите состояние:`;
+    text = mdv2.esc(`🔧 Калькулятор • Шаг 2/7`) + `${chipsCalc(s)}\n\n${MSG_ASK_CONDITION}`;
     rows = [
       [Markup.button.callback('Новый', 'calc:cond:new'), Markup.button.callback('С пробегом', 'calc:cond:used')],
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('В меню', 'home')]
     ];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 3) {
-    text = `🔧 Калькулятор • Шаг 3/7${chipsCalc(s)}\n\nГород доставки:`;
+    text = mdv2.esc(`🔧 Калькулятор • Шаг 3/7`) + `${chipsCalc(s)}\n\n` + mdv2.esc('Город доставки:');
     rows = [
       [Markup.button.callback('Москва', 'calc:city:msk'), Markup.button.callback('Санкт-Петербург', 'calc:city:spb')],
       [Markup.button.callback('Указать свой', 'calc:city:oth')],
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 4) {
-    text = `🔧 Калькулятор • Шаг 4/7${chipsCalc(s)}\n\nСтрана вывоза:`;
+    text = mdv2.esc(`🔧 Калькулятор • Шаг 4/7`) + `${chipsCalc(s)}\n\n` + mdv2.esc('Страна вывоза:');
     rows = [
       COUNTRIES.slice(0,3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
       COUNTRIES.slice(3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 5) {
-    text = `🔧 Калькулятор • Шаг 5/7${chipsCalc(s)}\n\nДобавить комментарий?`;
+    text = mdv2.esc(`🔧 Калькулятор • Шаг 5/7`) + `${chipsCalc(s)}\n\n` + mdv2.esc('Добавить комментарий?');
     rows = [
       [Markup.button.callback('Добавить комментарий', 'calc:comment:add')],
       [Markup.button.callback('Нет пожеланий', 'calc:comment:none')],
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
     ];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 6) {
-    text = `📦 Ориентировочная стоимость и сроки${chipsCalc(s)}\n\n` + renderCostBlock(s);
+    text = mdv2.esc('📦 Ориентировочная стоимость и сроки') + `${chipsCalc(s)}\n\n` +
+      renderCostBlock(s) + '\n\n' +
+      MSG_CUSTOMS_NOTE(s.bm || 'авто', s.city || 'Москве');
     rows = [[Markup.button.callback('Далее → Выбор канала связи', 'calc:to_contact')]];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   if (step === 7) {
-    text = `📨 Канал для отправки персонального предложения${chipsCalc(s)}\n\nВыберите удобный канал:`;
+    text = mdv2.esc('📨 Канал для отправки персонального предложения') + `${chipsCalc(s)}\n\n` +
+      mdv2.esc('Выберите удобный канал:');
     rows = [
       [Markup.button.callback('Телефон', 'calc:cm:phone')],
       [Markup.button.callback('Telegram', 'calc:cm:tg')],
       [Markup.button.callback('WhatsApp', 'calc:cm:wa')],
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('В меню', 'home')]
     ];
-    return { text, markup: Markup.inlineKeyboard(rows) };
+    return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
 
   return { text, markup: Markup.inlineKeyboard([[Markup.button.callback('В меню', 'home')]]) };
@@ -497,15 +498,12 @@ function renderCostBlock(s) {
   const c = COST[s.country];
   const countryTitle = COUNTRIES.find(x => x.code === s.country)?.title || '';
   const parts = [];
-  if (countryTitle) parts.push(`Стоимость доставки авто из ${countryTitle} — ${fmt(c?.delivery || 0)} ₽.`);
-  if (c?.days) parts.push(`Срок доставки: ~${c.days} дней.`);
-  parts.push(`Услуги компании: ${fmt((c && c.service) || 150000)} ₽.`);
-  parts.push(`Предоплата: 10%.`);
+  if (countryTitle) parts.push(mdv2.esc(`Стоимость доставки авто из ${countryTitle} — ${fmt(c?.delivery || 0)} ₽.`));
+  if (c?.days) parts.push(mdv2.esc(`Срок доставки: ~${c.days} дней.`));
+  parts.push(mdv2.esc(`Услуги компании: ${fmt((c && c.service) || 150000)} ₽.`));
+  parts.push(mdv2.esc(`Предоплата: 10%.`));
   parts.push('');
-  parts.push(`Стоимость растаможки зависит от конкретного автомобиля.`);
-  parts.push('');
-  const city = s.city || 'Москве';
-  parts.push(`Давайте подберём для вас ${s.bm || 'авто'} и отправим готовое предложение под ключ в ${city}.`);
+  parts.push(mdv2.esc(`Стоимость растаможки зависит от конкретного автомобиля.`));
   return parts.join('\n');
 }
 
@@ -605,7 +603,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     s.condition = a; // new | used
     if (a === 'used') {
       s.await_text = 'year';
-      await ctx.reply('Введите год выпуска (например: 2019).');
+      await ctx.reply(mdv2.esc('Введите год выпуска (например: 2019).'), { parse_mode: 'MarkdownV2' });
       return; // не перерисовываем меню
     } else {
       s.used_year = null;
@@ -619,7 +617,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     else if (a === 'spb') { s.city = 'Санкт-Петербург'; s.step = 4; }
     else if (a === 'oth') {
       s.await_text = 'city_custom';
-      await ctx.reply('Введите город доставки (только буквы, пробелы и дефисы).');
+      await ctx.reply(mdv2.esc('Введите город доставки (только буквы, пробелы и дефисы).'), { parse_mode: 'MarkdownV2' });
       return; // ждём ввод
     }
   }
@@ -631,7 +629,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
   if (type === 'comment') {
     if (a === 'add') {
       s.await_text = 'comment';
-      await ctx.reply('Введите комментарий одним сообщением.');
+      await ctx.reply(mdv2.esc('Введите комментарий одним сообщением.'), { parse_mode: 'MarkdownV2' });
       return; // ждём ввод
     }
     if (a === 'none') {
@@ -657,7 +655,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
         return;
       } else {
         s.await_text = 'tg_username';
-        await ctx.reply('Укажите ваш Telegram @username (например: @ivan_ivanov).');
+        await ctx.reply(mdv2.esc('Укажите ваш Telegram @username (например: @ivan_ivanov).'), { parse_mode: 'MarkdownV2' });
         return; // ждём ввод
       }
     }
@@ -683,7 +681,8 @@ bot.on('text', async (ctx) => {
 
   if (s.await_text === 'bm') {
     if (!validateBrandModel(t)) {
-      await ctx.reply('Неверный формат. Введите марку и модель латиницей (пример: BMW X5).');
+      await ctx.reply(mdv2.esc('Неверный формат. Введите марку и модель латиницей (пример: BMW X5).'),
+        { parse_mode: 'MarkdownV2' });
       return; // меню не показываем
     }
     s.bm = t.toUpperCase();
@@ -692,17 +691,18 @@ bot.on('text', async (ctx) => {
   } else if (s.await_text === 'year') {
     const y = parseYear(t);
     if (!y) {
-      await ctx.reply('Неверный год. Введите 4 цифры, например: 2018.');
+      await ctx.reply(mdv2.esc('Неверный год. Введите 4 цифры, например: 2018.'), { parse_mode: 'MarkdownV2' });
       return;
     }
     s.used_year = y;
     s.await_text = 'mileage';
-    await ctx.reply('Введите ограничение пробега (например: "до 50 000 км").');
+    await ctx.reply(mdv2.esc('Введите ограничение пробега (например: «до 50 000 км»).'), { parse_mode: 'MarkdownV2' });
     return; // ждём пробег, меню не показываем
   } else if (s.await_text === 'mileage') {
     const m = parseMileage(t);
     if (!m) {
-      await ctx.reply('Неверный пробег. Пример: "до 50 000 км".');
+      await ctx.reply(mdv2.esc('Неверный пробег. Пример: «до 50 000 км».'),
+        { parse_mode: 'MarkdownV2' });
       return;
     }
     s.used_mileage = m;
@@ -711,7 +711,8 @@ bot.on('text', async (ctx) => {
   } else if (s.await_text === 'city_custom') {
     const city = normalizeCityOrNull(t);
     if (!city) {
-      await ctx.reply('Неверный формат города. Используйте только буквы, пробелы и дефисы.');
+      await ctx.reply(mdv2.esc('Неверный формат города. Используйте только буквы, пробелы и дефисы.'),
+        { parse_mode: 'MarkdownV2' });
       return;
     }
     s.city = city;
@@ -722,18 +723,21 @@ bot.on('text', async (ctx) => {
     s.await_text = null;
     s.step = 6;
 
-    // «Просто сообщение» с расчётом
-    await ctx.reply('📦 Ориентировочная стоимость и сроки\n\n' + renderCostBlock(s));
+    // «Просто сообщение» с расчётом (Markdown-V2)
+    await ctx.reply(
+      mdv2.esc('📦 Ориентировочная стоимость и сроки') + '\n\n' + renderCostBlock(s),
+      { parse_mode: 'MarkdownV2' }
+    );
 
     // сразу следующий этап — выбор канала
     s.step = 7;
     const v = renderCalcPage(s);
-    await rebaseMaster(ctx, s, v.text, v.markup);
+    await rebaseMaster(ctx, s, v.text, v.markup, v.parse_mode);
     return;
   } else if (s.await_text === 'tg_username') {
     const u = t.replace(/^@/, '');
     if (!/^[A-Za-z0-9_]{5,}$/.test(u)) {
-      await ctx.reply('Неверный @username. Пример: @ivan_ivanov');
+      await ctx.reply(mdv2.esc('Неверный @username. Пример: @ivan_ivanов'), { parse_mode: 'MarkdownV2' });
       return;
     }
     s.tg_username = u;
@@ -765,7 +769,8 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
   try {
     if (s.contact_method === 'tg' && !s.tg_username && !ctx.from.username) {
       s.await_text = 'tg_username';
-      await ctx.reply('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanov).');
+      await ctx.reply(mdv2.esc('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanов).'),
+        { parse_mode: 'MarkdownV2' });
       return;
     }
     if ((s.contact_method === 'phone' || s.contact_method === 'wa') && !s.phone) {
@@ -777,14 +782,8 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     const responsible_id = nextResponsible();
     queueAmoDelivery({ payload, responsible_id });
 
-    // Спасибо-экран
-    const lines = [
-      '🎉 Спасибо за обращение! Ожидайте получения вашего персонального предложения.',
-      '',
-      '— Пока ждёте, подпишитесь на АВТОNEWS, чтобы быть в курсе самых свежих новостей.',
-      '— Горячие предложения авто в наличии/в пути — в нашем каталоге.',
-      '— Бесплатно проверить историю авто по VIN можно в нашем сервисе.'
-    ].join('\n');
+    // Спасибо-экран (Markdown-V2 со ссылками)
+    const lines = MSG_THANKS_SERVICES;
 
     const kb = Markup.inlineKeyboard([
       [Markup.button.url('Подписаться на AUTONEWS', NEWS_CHANNEL_URL)],
@@ -793,10 +792,11 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
       [Markup.button.callback('🔁 Новый расчёт', 'cta:start'), Markup.button.callback('🏠 В меню', 'home')]
     ]);
 
-    if (sendNew) await ctx.reply(lines, kb);
-    else {
+    if (sendNew) {
+      await ctx.reply(lines, { ...kb, parse_mode: 'MarkdownV2', disable_web_page_preview: false });
+    } else {
       const m = await ensureMasterMessage(ctx, s);
-      await safeEdit(ctx, m, lines, kb);
+      await safeEdit(ctx, m, lines, { ...kb }, 'MarkdownV2');
     }
 
     resetCalcState(s);
@@ -958,14 +958,17 @@ function renderFaqQuestions(secId, subId, page = 0) {
 function renderFaqAnswer(qid) {
   const q = FAQIndex.qById.get(qid);
   if (!q) return { text: 'Вопрос не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]]) };
-  const text = `❓ ${q.secTitle} → ${q.subTitle}\n**${q.q}**\n\n${q.a}`;
+  const text =
+    mdv2.esc(`❓ ${q.secTitle} → ${q.subTitle}`) + '\n' +
+    `*${mdv2.esc(q.q)}*` + '\n\n' +
+    mdv2.esc(q.a);
   const rows = [
     [Markup.button.callback('↩ К вопросам', `faq:list:${q.secId}:${q.subId}:0`)],
     [Markup.button.callback('К подразделу', `faq:sub:${q.secId}:${q.subId}`)],
     [Markup.button.callback('К разделам', 'faq')],
     [Markup.button.callback('В меню', 'home')]
   ];
-  return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'Markdown' };
+  return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
 }
 
 // ----------------- Вспомогательное -----------------
