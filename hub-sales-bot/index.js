@@ -379,7 +379,6 @@ function kbHome() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🚀 Начать', 'cta:start')],
     [Markup.button.callback('👨‍💼 Связаться с менеджером', 'cta:manager')],
-    // [Markup.button.callback('❓ Ответы на популярные вопросы', 'faq')]
   ]);
 }
 async function rebaseHome(ctx, s) {
@@ -405,7 +404,11 @@ function chipsCalc(s) {
     const ct = COUNTRIES.find(x => x.code === s.country);
     if (ct) arr.push(mdv2.esc(`Страна: ${ct.flag} ${ct.title}`));
   }
-  if (s.comment) arr.push(mdv2.esc('Комментарий: есть'));
+  if (s.comment === '') {
+    arr.push(mdv2.esc('Комментарий: нет'));
+  } else if (s.comment) {
+    arr.push(mdv2.esc('Комментарий: есть'));
+  }
   if (s.await_text === 'bm') arr.push(mdv2.esc('Введите марку/модель латиницей…'));
   if (s.await_text === 'year') arr.push(mdv2.esc('Введите год выпуска…'));
   if (s.await_text === 'mileage') arr.push(mdv2.esc('Введите ограничение пробега…'));
@@ -446,7 +449,8 @@ function renderCalcPage(s) {
     rows = [
       [Markup.button.callback('Москва', 'calc:city:msk'), Markup.button.callback('Санкт-Петербург', 'calc:city:spb')],
       [Markup.button.callback('Указать свой', 'calc:city:oth')],
-      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
+      // Убрали кнопку "Вперёд →"
+      [Markup.button.callback('↩ Назад', 'calc:back')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
@@ -456,7 +460,8 @@ function renderCalcPage(s) {
     rows = [
       COUNTRIES.slice(0,3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
       COUNTRIES.slice(3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
-      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
+      // Убрали кнопку "Вперёд →" — переход на Шаг 5 будет по клику на страну
+      [Markup.button.callback('↩ Назад', 'calc:back')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
@@ -466,7 +471,7 @@ function renderCalcPage(s) {
     rows = [
       [Markup.button.callback('Добавить комментарий', 'calc:comment:add')],
       [Markup.button.callback('Нет пожеланий', 'calc:comment:none')],
-      [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('Вперёд →', 'calc:next')]
+      [Markup.button.callback('↩ Назад', 'calc:back')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
   }
@@ -604,7 +609,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     if (a === 'used') {
       s.await_text = 'year';
       await ctx.reply(mdv2.esc('Введите год выпуска (например: 2019).'), { parse_mode: 'MarkdownV2' });
-      return; // не перерисовываем меню
+      return; // ждём ввод
     } else {
       s.used_year = null;
       s.used_mileage = null;
@@ -623,7 +628,9 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
   }
 
   if (type === 'country') {
+    // Автовыбор страны на Шаге 4 сразу переносит на Шаг 5
     s.country = a; // EU/KR/CN/US/AE
+    s.step = 5;
   }
 
   if (type === 'comment') {
@@ -633,8 +640,21 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
       return; // ждём ввод
     }
     if (a === 'none') {
-      s.comment = '';
-      s.step = 6;
+      // Выбран вариант без комментариев → показать Шаг 6 отдельным сообщением и сразу перейти к Шагу 7
+      s.comment = '';      // пустая строка => «Комментарий: нет»
+      s.await_text = null;
+
+      // Сообщение с расчётом (Шаг 6 как отдельный пост)
+      await ctx.reply(
+        mdv2.esc('📦 Ориентировочная стоимость и сроки') + '\n\n' + renderCostBlock(s),
+        { parse_mode: 'MarkdownV2' }
+      );
+
+      // Переход на Шаг 7 и рендер меню
+      s.step = 7;
+      const view = renderCalcPage(s);
+      await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
+      return;
     }
   }
 
@@ -662,7 +682,9 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
   }
 
   if (type === 'back') {
-    if (s.step > 1) s.step = s.step - 1;
+    // Спец-правило: с Этапа 7 «Назад» переносит сразу на Этап 5
+    if (s.step === 7) s.step = 5;
+    else if (s.step > 1) s.step = s.step - 1;
   }
   if (type === 'next') {
     if (s.step < 7) s.step = s.step + 1;
@@ -719,17 +741,15 @@ bot.on('text', async (ctx) => {
     s.await_text = null;
     s.step = 4;
   } else if (s.await_text === 'comment') {
+    // Введён комментарий → показать Шаг 6 отдельным сообщением и перейти к Шагу 7
     s.comment = t.slice(0, 800);
     s.await_text = null;
-    s.step = 6;
 
-    // «Просто сообщение» с расчётом (Markdown-V2)
     await ctx.reply(
       mdv2.esc('📦 Ориентировочная стоимость и сроки') + '\n\n' + renderCostBlock(s),
       { parse_mode: 'MarkdownV2' }
     );
 
-    // сразу следующий этап — выбор канала
     s.step = 7;
     const v = renderCalcPage(s);
     await rebaseMaster(ctx, s, v.text, v.markup, v.parse_mode);
@@ -769,7 +789,7 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
   try {
     if (s.contact_method === 'tg' && !s.tg_username && !ctx.from.username) {
       s.await_text = 'tg_username';
-      await ctx.reply(mdv2.esc('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanов).'),
+      await ctx.reply(mdv2.esc('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanov).'),
         { parse_mode: 'MarkdownV2' });
       return;
     }
@@ -782,7 +802,6 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     const responsible_id = nextResponsible();
     queueAmoDelivery({ payload, responsible_id });
 
-    // Спасибо-экран (Markdown-V2 со ссылками)
     const lines = MSG_THANKS_SERVICES;
 
     const kb = Markup.inlineKeyboard([
@@ -983,7 +1002,7 @@ function resetCalcState(s) {
   s.used_mileage = null;
   s.city = null;
   s.country = null;
-  s.comment = null;
+  s.comment = null; // null — ещё не выбрано; '' — пользователь выбрал «нет»
   s.contact_method = null;
   s.phone = null;
   s.tg_username = null;
