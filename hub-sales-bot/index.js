@@ -36,6 +36,8 @@ const VIN_BOT_URL = process.env.VIN_BOT_URL || 'https://t.me';
 const NEWS_CHANNEL_URL = process.env.NEWS_CHANNEL_URL || 'https://t.me';
 const CATALOG_URL = process.env.CATALOG_URL || 'https://example.com';
 
+const MANAGER_TG_URL = process.env.MANAGER_TG_URL || 'https://t.me/your_manager_username';
+
 // amoCRM
 const AMO_BASE_URL = process.env.AMO_BASE_URL;
 const AMO_CLIENT_ID = process.env.AMO_CLIENT_ID;
@@ -378,7 +380,7 @@ function homeText() {
 function kbHome() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🚀 Начать', 'cta:start')],
-    [Markup.button.callback('👨‍💼 Связаться с менеджером', 'cta:manager')],
+    [Markup.button.url('👨‍💼 Связаться с менеджером', MANAGER_TG_URL)],
   ]);
 }
 async function rebaseHome(ctx, s) {
