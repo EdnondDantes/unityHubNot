@@ -487,12 +487,9 @@ function renderCalcPage(s) {
   }
 
   if (step === 7) {
-    text = mdv2.esc('📨 Канал для отправки персонального предложения') + `${chipsCalc(s)}\n\n` +
-      mdv2.esc('Выберите удобный канал:');
+    text =  mdv2.esc('Куда вам удобнее получить предложение?');
     rows = [
-      [Markup.button.callback('Телефон', 'calc:cm:phone')],
-      [Markup.button.callback('Telegram', 'calc:cm:tg')],
-      [Markup.button.callback('WhatsApp', 'calc:cm:wa')],
+      [Markup.button.callback('Телефон', 'calc:cm:phone'), Markup.button.callback('Telegram', 'calc:cm:tg'), Markup.button.callback('WhatsApp', 'calc:cm:wa')],
       [Markup.button.callback('↩ Назад', 'calc:back'), Markup.button.callback('В меню', 'home')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
@@ -503,6 +500,8 @@ function renderCalcPage(s) {
 
 function renderCostBlock(s) {
   const c = COST[s.country];
+  const bm = (s.bm && String(s.bm).trim()) || 'авто';
+  const city = (s.city && String(s.city).trim()) || 'вашем городе';
   const countryTitle = COUNTRIES.find(x => x.code === s.country)?.title || '';
   const parts = [];
   if (countryTitle) parts.push(mdv2.esc(`Стоимость доставки авто из ${countryTitle} — ${fmt(c?.delivery || 0)} ₽.`));
@@ -511,6 +510,7 @@ function renderCostBlock(s) {
   parts.push(mdv2.esc(`Предоплата: 10%.`));
   parts.push('');
   parts.push(mdv2.esc(`Стоимость растаможки зависит от конкретного автомобиля.`));
+  parts.push(mdv2.esc(`Давайте подберём для вас ${bm} и отправим вам готовое предложение «под ключ» в городе ${city}.`));
   return parts.join('\n');
 }
 
