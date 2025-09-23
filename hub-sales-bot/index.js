@@ -29,7 +29,7 @@ const OUTBOX_PATH = path.join(DATA_DIR, 'outbox.json');
 const DEDUP_PATH  = path.join(DATA_DIR, 'dedup.json');
 const RR_PATH     = path.join(DATA_DIR, 'rr.json');
 const FAQ_PATH    = path.join(__dirname, 'faq.json');
-
+const OAUTH_PATH  = path.join(DATA_DIR, 'amo_oauth.json');
 
 // ----------------- Конфиг окружения -----------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -242,32 +242,52 @@ const PRESET_CITIES = [
 
 // ----------------- AmoCRM клиент -----------------
 const amo = (() => {
-  async function refreshToken() {
-    const url = `${AMO_BASE_URL}/oauth2/access_token`;
-    const body = {
-      client_id: AMO_CLIENT_ID,
-      client_secret: AMO_CLIENT_SECRET,
-      grant_type: 'refresh_token',
-      refresh_token: AMO_REFRESH_TOKEN,
-      redirect_uri: AMO_REDIRECT_URI
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!res.ok) throw new Error(`AMO refresh failed: ${res.status} ${await res.text()}`);
-    const data = await res.json();
-    amo.accessToken = data.access_token;
-    amo.expiresAt = Date.now() + (data.expires_in - 60) * 1000;
+  // refresh_token ротируется — сохраняем его на диск
+  const oauthStore = loadJSON(OAUTH_PATH, { refresh_token: process.env.AMO_REFRESH_TOKEN || '' });
+  let refreshingPromise = null;
+
+  async function refreshToken(force = false) {
+    if (refreshingPromise && !force) return refreshingPromise;
+    refreshingPromise = (async () => {
+      const refresh_token = oauthStore.refresh_token || process.env.AMO_REFRESH_TOKEN || '';
+      if (!refresh_token) throw new Error('AMO refresh_token is missing');
+      const url = `${AMO_BASE_URL}/oauth2/access_token`;
+      const body = {
+        client_id: AMO_CLIENT_ID,
+        client_secret: AMO_CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        refresh_token,
+        redirect_uri: AMO_REDIRECT_URI
+      };
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`AMO refresh failed: ${res.status} ${txt}`);
+      }
+      const data = await res.json();
+      amo.accessToken = data.access_token;
+      amo.expiresAt = Date.now() + Math.max(0, (data.expires_in || 0) - 60) * 1000;
+      if (data.refresh_token && data.refresh_token !== oauthStore.refresh_token) {
+        oauthStore.refresh_token = data.refresh_token;
+        saveJSON(OAUTH_PATH, oauthStore);
+        LOG.info('amoCRM refresh_token rotated and saved');
+      }
+      return true;
+    })().finally(() => { refreshingPromise = null; });
+    return refreshingPromise;
   }
   async function ensureToken() {
-    if (!amo.accessToken || Date.now() > amo.expiresAt) await refreshToken();
+    if (!amo.accessToken || !amo.expiresAt || Date.now() > amo.expiresAt) {
+      await refreshToken();
+    }
   }
   async function api(method, path, body) {
     await ensureToken();
-    const url = `${AMO_BASE_URL}${path}`;
-    const res = await fetch(url, {
+    const doFetch = async () => fetch(`${AMO_BASE_URL}${path}`, {
       method,
       headers: {
         'Authorization': `Bearer ${amo.accessToken}`,
@@ -276,7 +296,16 @@ const amo = (() => {
       },
       body: body ? JSON.stringify(body) : undefined
     });
-    if (!res.ok) throw new Error(`AMO ${method} ${path} -> ${res.status}: ${await res.text()}`);
+    let res = await doFetch();
+    if (res.status === 401) {
+      LOG.warn({ path }, '401 from amoCRM, refreshing token and retrying once');
+      await refreshToken(true);
+      res = await doFetch();
+    }
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`AMO ${method} ${path} -> ${res.status}: ${txt}`);
+    }
     if (res.status === 204) return null;
     return res.json();
   }
