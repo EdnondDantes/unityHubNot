@@ -11,12 +11,13 @@ const {
 
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // v2 для Node 16
 const { ulid } = require('ulid');
 const dayjs = require('dayjs');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const crypto = require('crypto');
 
 // ----------------- Логгер -----------------
 const LOG = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -28,6 +29,7 @@ const OUTBOX_PATH = path.join(DATA_DIR, 'outbox.json');
 const DEDUP_PATH  = path.join(DATA_DIR, 'dedup.json');
 const RR_PATH     = path.join(DATA_DIR, 'rr.json');
 const FAQ_PATH    = path.join(__dirname, 'faq.json');
+
 
 // ----------------- Конфиг окружения -----------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -77,7 +79,8 @@ const RESPONSIBLES = String(process.env.AMO_RESPONSIBLES || '')
 // ----------------- Состояния/хранилища -----------------
 const S = new Map();
 const outbox = loadJSON(OUTBOX_PATH, []);
-const dedup  = loadJSON(DEDUP_PATH, {});
+// структура dedup: { queued: {key: ts}, sent: {key: ts} }
+const dedup  = loadJSON(DEDUP_PATH, { queued: {}, sent: {} });
 const rr     = loadJSON(RR_PATH, { i: 0 });
 
 // ----------------- FAQ -----------------
@@ -103,17 +106,56 @@ function buildFaqIndex(faq) {
 
 // ----------------- Утилиты -----------------
 function loadJSON(file, fallback) {
-  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (e) { LOG.warn({ e }, `loadJSON error: ${file}`); }
-  return fallback;
+  try {
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+    // если файла нет — создаём с дефолтом
+    fs.writeFileSync(file, JSON.stringify(fallback, null, 2));
+    return fallback;
+  } catch (e) {
+    LOG.warn({ err: String(e) }, `loadJSON error: ${file}`);
+    return fallback;
+  }
 }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function nowISO() { return new Date().toISOString(); }
 
+// ====== Idempotency / Dedup ======
+function sha1(s){ return crypto.createHash('sha1').update(String(s)).digest('hex'); }
+function dedupKeyFromPayload(p) {
+  // приоритет: lead_uid → flow_uid → хеш содержимого
+  if (p.lead_uid) return `lead:${p.lead_uid}`;
+  if (p.flow_uid) return `flow:${p.flow_uid}`;
+  const basis = JSON.stringify({
+    bm: p.bm, city: p.city, country: p.country, condition: p.condition,
+    used_year: p.used_year, used_mileage: p.used_mileage,
+    phone: p?.contact?.phone_e164 || null, tg: p?.contact?.tg_username || null
+  });
+  return `hash:${sha1(basis)}`;
+}
+function dedupSeen(key, ttlMs = 24*60*60*1000) {
+  const t = dedup.sent[key] || 0;
+  return t && (Date.now() - t) < ttlMs;
+}
+function dedupQueued(key, ttlMs = 10*60*1000) {
+  const t = dedup.queued[key] || 0;
+  return t && (Date.now() - t) < ttlMs;
+}
+function markQueued(key) {
+  dedup.queued[key] = Date.now(); saveJSON(DEDUP_PATH, dedup);
+}
+function markSent(key) {
+  dedup.sent[key] = Date.now(); delete dedup.queued[key]; saveJSON(DEDUP_PATH, dedup);
+}
+function dedupCleanup() {
+  const now = Date.now();
+  for (const [k, t] of Object.entries(dedup.queued)) if (now - t > 24*60*60*1000) delete dedup.queued[k];
+  for (const [k, t] of Object.entries(dedup.sent))   if (now - t > 7*24*60*1000) delete dedup.sent[k];
+  saveJSON(DEDUP_PATH, dedup);
+}
+
 // ====== Текст → HTML для Telegram ======
-// 1) снимаем экранирование MarkdownV2 (\- \_ \. \! ...);
-// 2) [text](url) → <a href="url">text</a>;
-// 3) "- " → "• "; переносы оставляем \n (НЕ <br>).
 function stripMdV2Escapes(s) {
   return String(s || '').replace(/\\([_*\[\]()~`>#+\-=|{}.!\\])/g, '$1');
 }
@@ -260,7 +302,6 @@ const amo = (() => {
 
       if (found) {
         const basePatch = { id: found.id, name: name || found.name || phone_e164 };
-        // Сначала пробуем с кастом-полем
         try {
           const body = [ contactCF.length ? { ...basePatch, custom_fields_values: contactCF } : basePatch ];
           await api('PATCH', `/api/v4/contacts`, body);
@@ -272,7 +313,6 @@ const amo = (() => {
             throw e;
           }
         }
-        // Пишем заметку с TG на всякий случай
         if (tg_username) {
           try { await addContactNote(found.id, `Telegram: @${tg_username}`); } catch {}
         }
@@ -290,7 +330,6 @@ const amo = (() => {
       bodyBase.custom_fields_values.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
     }
 
-    // Пробуем создать с кастом-полем; если упадёт — перешлём без него
     try {
       const resp = await api('POST', `/api/v4/contacts`, [bodyBase]);
       const id = resp._embedded.contacts[0].id;
@@ -595,6 +634,8 @@ bot.action('cta:start', async (ctx) => {
   resetCalcState(s);
   s.flow = 'calc';
   s.step = 1;
+  s.flow_uid = ulid();        // важный идентификатор сессии
+  s.submitted = false;        // сбрасываем флажок завершения
   S.set(ctx.from.id, s);
   const view = renderCalcPage(s);
   await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
@@ -606,6 +647,8 @@ bot.action('cta:manager', async (ctx) => {
   resetCalcState(s);
   s.flow = 'manager';
   s.step = 7; // сразу на выбор канала связи
+  s.flow_uid = ulid();
+  s.submitted = false;
   const view = renderCalcPage(s);
   await rebaseMaster(ctx, s, view.text, view.markup);
 });
@@ -655,6 +698,12 @@ bot.action(/^faq:q:(.+)$/, async (ctx) => {
 bot.action(/^calc:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const s = S.get(ctx.from.id); if (!s) return;
+
+  // если уже завершили и в «кулдауне» — игнорируем тап
+  if (s.submitted && s.cooldown_until && Date.now() < s.cooldown_until) {
+    return;
+  }
+
   const [type, a] = ctx.match[1].split(':');
 
   if (type === 'cond') {
@@ -829,6 +878,11 @@ bot.on('contact', async (ctx) => {
 // ----------------- Финализация -----------------
 async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
   try {
+    // анти-дабл-клик/гонка колбэков + кулдаун
+    if (s.__finalizing) return;
+    if (s.submitted && s.cooldown_until && Date.now() < s.cooldown_until) return;
+    s.__finalizing = true;
+
     if (s.contact_method === 'tg' && !s.tg_username && !ctx.from.username) {
       s.await_text = 'tg_username';
       await ctx.reply(mdv2.esc('Нужен Telegram @username для связи. Укажите его сообщением (например: @ivan_ivanov).'),
@@ -844,9 +898,7 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     const responsible_id = nextResponsible();
     queueAmoDelivery({ payload, responsible_id });
 
-    const lines = MSG_THANKS_SERVICES;
-    const html  = toHtmlForTelegram(lines);
-
+    const html  = toHtmlForTelegram(MSG_THANKS_SERVICES);
     const kb = Markup.inlineKeyboard([
       [Markup.button.url('Подписаться на AUTONEWS', NEWS_CHANNEL_URL)],
       [Markup.button.url('Каталог авто', CATALOG_URL)],
@@ -861,19 +913,29 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
       await safeEdit(ctx, m, html, { ...kb }, 'HTML');
     }
 
-    resetCalcState(s);
+    // помечаем завершение и ставим кулдаун, а сброс состояния — с задержкой
+    s.submitted = true;
+    s.cooldown_until = Date.now() + 10_000;
+    const oldLeadUid = s.lead_uid;
+    setTimeout(() => {
+      // если за 10 сек не было новой сессии — сбросим
+      if (s.lead_uid === oldLeadUid) resetCalcState(s);
+    }, 10_000);
   } catch (e) {
     LOG.error(e, 'finalize error');
     await notifyAndRebaseHome(
       ctx,
       s,
-      '⚠️ Не удалось отправить подтверждение в Telegram, но заявка поставлена в очередь на отправку в amoCRM. Повторим попытку.'
+      '⚠️ Не удалось отправить подтверждение в Telegram, но заявка поставлена в очередь в amoCRM. Повторим попытку.'
     );
+  } finally {
+    s.__finalizing = false;
   }
 }
 
 function buildPayloadFromState(ctx, s) {
   return {
+    flow_uid: s.flow_uid || ulid(),        // добавили в полезную нагрузку
     lead_uid: s.lead_uid || ulid(),
     created_at: nowISO(),
     type: s.flow || 'calc',
@@ -895,9 +957,16 @@ function buildPayloadFromState(ctx, s) {
 }
 
 function queueAmoDelivery({ payload, responsible_id }) {
+  const key = dedupKeyFromPayload(payload);
+  if (dedupQueued(key) || dedupSeen(key)) {
+    LOG.warn({ key }, 'duplicate lead suppressed (already queued/sent)');
+    return;
+  }
+  markQueued(key);
   outbox.push({
     id: ulid(),
     t: 'amo.calc',
+    dedup_key: key,
     payload,
     responsible_id: responsible_id || null,
     attempts: 0,
@@ -906,6 +975,7 @@ function queueAmoDelivery({ payload, responsible_id }) {
   saveJSON(OUTBOX_PATH, outbox);
 }
 setInterval(processOutboxTick, 2000);
+setInterval(dedupCleanup, 60*60*1000); // часовой сборщик мусора
 
 async function processOutboxTick() {
   const now = Date.now();
@@ -913,8 +983,16 @@ async function processOutboxTick() {
     if (job.next_at > now) continue;
     try {
       if (job.t === 'amo.calc') {
+        const k = job.dedup_key || dedupKeyFromPayload(job.payload);
+        if (dedupSeen(k)) {
+          const idx0 = outbox.findIndex(x => x.id === job.id);
+          if (idx0 >= 0) outbox.splice(idx0, 1);
+          saveJSON(OUTBOX_PATH, outbox);
+          continue;
+        }
         const res = await deliverCalcToAmo(job.payload, job.responsible_id);
         LOG.info({ res }, 'amoCRM lead created');
+        markSent(k);
       }
       const idx = outbox.findIndex(x => x.id === job.id);
       if (idx >= 0) outbox.splice(idx, 1);
@@ -926,7 +1004,7 @@ async function processOutboxTick() {
       saveJSON(OUTBOX_PATH, outbox);
       LOG.warn({ err: String(e), attempts: job.attempts, backoffMs }, 'amoCRM delivery error, will retry');
       if (job.attempts === 3 && ADMIN_CHAT_ID) {
-        try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, `⚠️ amoCRM недоступна, повторная попытка через ${Math.round(backoffMs/1000)}с`); } catch {}
+        try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, `⚠️ amoCRM недоступна, повтор через ${Math.round(backoffMs/1000)}с`); } catch {}
       }
     }
   }
@@ -991,18 +1069,31 @@ function renderFaqSections() {
 }
 function renderFaqSubs(secId) {
   const sec = FAQIndex.secById.get(secId);
-  if (!sec) return { text: 'Раздел не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]]) };
+  if (!sec) {
+    return {
+      text: 'Раздел не найден.',
+      markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]])
+    };
+  }
   const rows = [];
-  for (const sub of sec.subs || []) rows.push([Markup.button.callback(sub.title, `faq:sub:${secId}:${sub.id}`)]);
+  for (const sub of sec.subs || []) {
+    rows.push([Markup.button.callback(sub.title, `faq:sub:${secId}:${sub.id}`)]);
+  }
   rows.push([Markup.button.callback('↩ К разделам', 'faq')]);
   const text = `❓ ${sec.title}\nВыберите подраздел:`;
   return { text, markup: Markup.inlineKeyboard(rows) };
 }
+
 function renderFaqQuestions(secId, subId, page = 0) {
   const key = `${secId}:${subId}`;
   const sub = FAQIndex.subByKey.get(key);
   const sec = FAQIndex.secById.get(secId);
-  if (!sub || !sec) return { text: 'Подраздел не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('↩ К подразделам', `faq:sec:${secId}`)]]) };
+  if (!sub || !sec) {
+    return {
+      text: 'Подраздел не найден.',
+      markup: Markup.inlineKeyboard([[Markup.button.callback('↩ К подразделам', `faq:sec:${secId}`)]])
+    };
+  }
 
   const qs = sub.qs || [];
   const total = qs.length;
@@ -1019,18 +1110,28 @@ function renderFaqQuestions(secId, subId, page = 0) {
   if (p < pages - 1) nav.push(Markup.button.callback('Вперёд →', `faq:list:${secId}:${subId}:${p + 1}`));
   if (nav.length) rows.push(nav);
 
-  rows.push([Markup.button.callback('↩ К подразделам', `faq:sec:${secId}`), Markup.button.callback('К разделам', 'faq')]);
+  rows.push([
+    Markup.button.callback('↩ К подразделам', `faq:sec:${secId}`),
+    Markup.button.callback('К разделам', 'faq')
+  ]);
 
   const text = `❓ ${sec.title} → ${sub.title}\nВыберите вопрос:`;
   return { text, markup: Markup.inlineKeyboard(rows) };
 }
+
 function renderFaqAnswer(qid) {
   const q = FAQIndex.qById.get(qid);
-  if (!q) return { text: 'Вопрос не найден.', markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]]) };
+  if (!q) {
+    return {
+      text: 'Вопрос не найден.',
+      markup: Markup.inlineKeyboard([[Markup.button.callback('К разделам', 'faq')]])
+    };
+  }
   const text =
     mdv2.esc(`❓ ${q.secTitle} → ${q.subTitle}`) + '\n' +
     `*${mdv2.esc(q.q)}*` + '\n\n' +
     mdv2.esc(q.a);
+
   const rows = [
     [Markup.button.callback('↩ К вопросам', `faq:list:${q.secId}:${q.subId}:0`)],
     [Markup.button.callback('К подразделу', `faq:sub:${q.secId}:${q.subId}`)],
@@ -1045,18 +1146,26 @@ function resetCalcState(s) {
   s.flow = null;
   s.step = 0;
   s.await_text = null;
+
+  s.flow_uid = ulid();       // новая сессия
   s.lead_uid = ulid();
+
   s.bm = null;
   s.condition = null;
   s.used_year = null;
   s.used_mileage = null;
   s.city = null;
   s.country = null;
-  s.comment = null; // null — ещё не выбрано; '' — пользователь выбрал «нет»
+  s.comment = null;          // null — не трогали; '' — «нет пожеланий»
+
   s.contact_method = null;
   s.phone = null;
   s.tg_username = null;
   s.contact_name = null;
+
+  s.submitted = false;
+  s.cooldown_until = 0;
+  s.__finalizing = false;
 }
 
 function nextResponsible() {
@@ -1075,11 +1184,14 @@ async function askContact(ctx, s) {
 }
 
 // ----------------- Запуск -----------------
-bot.launch().then(() => {
-  LOG.info('LeadBot 2.0.1 started');
-}).catch(e => {
-  LOG.error(e, 'bot.launch error');
-  process.exit(1);
-});
+bot.launch()
+  .then(() => {
+    LOG.info('LeadBot 2.0.1 started');
+  })
+  .catch(e => {
+    LOG.error(e, 'bot.launch error');
+    process.exit(1);
+  });
+
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
