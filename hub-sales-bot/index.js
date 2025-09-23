@@ -81,6 +81,14 @@ const S = new Map();
 const outbox = loadJSON(OUTBOX_PATH, []);
 // структура dedup: { queued: {key: ts}, sent: {key: ts} }
 const dedup  = loadJSON(DEDUP_PATH, { queued: {}, sent: {} });
+// миграция старого формата (мог быть пустой объект {})
+if (!dedup || typeof dedup !== 'object') {
+  // в крайне редком случае повреждения файла
+  Object.assign((dedup || {}), { queued: {}, sent: {} });
+}
+if (!dedup.queued || typeof dedup.queued !== 'object') dedup.queued = {};
+if (!dedup.sent   || typeof dedup.sent   !== 'object') dedup.sent   = {};
+try { saveJSON(DEDUP_PATH, dedup); } catch {}
 const rr     = loadJSON(RR_PATH, { i: 0 });
 
 // ----------------- FAQ -----------------
@@ -135,23 +143,33 @@ function dedupKeyFromPayload(p) {
   return `hash:${sha1(basis)}`;
 }
 function dedupSeen(key, ttlMs = 24*60*60*1000) {
-  const t = dedup.sent[key] || 0;
+  const sent = (dedup.sent ||= {});
+  const t = sent[key] || 0;
   return t && (Date.now() - t) < ttlMs;
 }
 function dedupQueued(key, ttlMs = 10*60*1000) {
-  const t = dedup.queued[key] || 0;
+  const queued = (dedup.queued ||= {});
+  const t = queued[key] || 0;
   return t && (Date.now() - t) < ttlMs;
 }
 function markQueued(key) {
-  dedup.queued[key] = Date.now(); saveJSON(DEDUP_PATH, dedup);
+  (dedup.queued ||= {});
+  dedup.queued[key] = Date.now();
+  saveJSON(DEDUP_PATH, dedup);
 }
 function markSent(key) {
-  dedup.sent[key] = Date.now(); delete dedup.queued[key]; saveJSON(DEDUP_PATH, dedup);
+  (dedup.sent ||= {});
+  (dedup.queued ||= {});
+  dedup.sent[key] = Date.now();
+  delete dedup.queued[key];
+  saveJSON(DEDUP_PATH, dedup);
 }
 function dedupCleanup() {
   const now = Date.now();
-  for (const [k, t] of Object.entries(dedup.queued)) if (now - t > 24*60*60*1000) delete dedup.queued[k];
-  for (const [k, t] of Object.entries(dedup.sent))   if (now - t > 7*24*60*1000) delete dedup.sent[k];
+  const queued = (dedup.queued ||= {});
+  const sent   = (dedup.sent   ||= {});
+  for (const [k, t] of Object.entries(queued)) if (now - t > 24*60*60*1000) delete queued[k];
+  for (const [k, t] of Object.entries(sent))   if (now - t > 7*24*60*1000*24) delete sent[k];
   saveJSON(DEDUP_PATH, dedup);
 }
 
