@@ -62,3 +62,6 @@ Thumbs.db
 # ==== Docker (если используешь) ====
 docker-data/
 .docker/
+
+ids.js
+amo_get_refresh_env.js

@@ -25,9 +25,9 @@ const LOG = pino({ level: process.env.LOG_LEVEL || 'info' });
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const OUTBOX_PATH = path.join(DATA_DIR, 'outbox.json');
-const DEDUP_PATH = path.join(DATA_DIR, 'dedup.json');
-const RR_PATH = path.join(DATA_DIR, 'rr.json');
-const FAQ_PATH = path.join(__dirname, 'faq.json');
+const DEDUP_PATH  = path.join(DATA_DIR, 'dedup.json');
+const RR_PATH     = path.join(DATA_DIR, 'rr.json');
+const FAQ_PATH    = path.join(__dirname, 'faq.json');
 
 // ----------------- Конфиг окружения -----------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -38,7 +38,7 @@ const CATALOG_URL = process.env.CATALOG_URL || 'https://example.com';
 
 const MANAGER_TG_URL = process.env.MANAGER_TG_URL || 'https://t.me/your_manager_username';
 
-// amoCRM
+// amoCRM OAuth2/база
 const AMO_BASE_URL = process.env.AMO_BASE_URL;
 const AMO_CLIENT_ID = process.env.AMO_CLIENT_ID;
 const AMO_CLIENT_SECRET = process.env.AMO_CLIENT_SECRET;
@@ -51,17 +51,18 @@ const AMO_STATUS_IMPORT_NEW_ID = Number(process.env.AMO_STATUS_IMPORT_NEW_ID || 
 
 // Кастомные поля LEAD
 const CF = {
-  DIRECTION: Number(process.env.AMO_CF_LEAD_DIRECTION_ID || 0),
-  COUNTRY: Number(process.env.AMO_CF_LEAD_COUNTRY_ID || 0),
-  DELIVERY_CITY: Number(process.env.AMO_CF_LEAD_DELIVERY_CITY_ID || 0),
-  CITY: Number(process.env.AMO_CF_LEAD_CITY_ID || 0),
-  START_PARAM: Number(process.env.AMO_CF_LEAD_START_PARAM_ID || 0),
-  UTM_SOURCE: Number(process.env.AMO_CF_LEAD_UTM_SOURCE_ID || 0),
-  UTM_MEDIUM: Number(process.env.AMO_CF_LEAD_UTM_MEDIUM_ID || 0),
-  UTM_CAMPAIGN: Number(process.env.AMO_CF_LEAD_UTM_CAMPAIGN_ID || 0),
-  UTM_CONTENT: Number(process.env.AMO_CF_LEAD_UTM_CONTENT_ID || 0),
-  PD_VERSION: Number(process.env.AMO_CF_LEAD_PD_VERSION_ID || 0),
-  PD_TS: Number(process.env.AMO_CF_LEAD_PD_TS_ID || 0)
+  MODEL:          Number(process.env.AMO_CF_LEAD_MODEL_ID || 0),
+  CONDITION:      Number(process.env.AMO_CF_LEAD_CONDITION_ID || 0),
+  YEAR:           Number(process.env.AMO_CF_LEAD_YEAR_ID || 0),
+  MILEAGE_MAX:    Number(process.env.AMO_CF_LEAD_MILEAGE_MAX_ID || 0),
+  DELIVERY_CITY:  Number(process.env.AMO_CF_LEAD_DELIVERY_CITY_ID || 0),
+  COUNTRY_TITLE:  Number(process.env.AMO_CF_LEAD_COUNTRY_TITLE_ID || 0),
+  COMMENT_TEXT:   Number(process.env.AMO_CF_LEAD_COMMENT_TEXT_ID || 0),
+  CONTACT_METHOD: Number(process.env.AMO_CF_LEAD_CONTACT_METHOD_ID || 0),
+  CONTACT_PHONE:  Number(process.env.AMO_CF_LEAD_CONTACT_PHONE_ID || 0),
+  CONTACT_TG:     Number(process.env.AMO_CF_LEAD_CONTACT_TG_ID || 0), // опционально
+  CITY:           Number(process.env.AMO_CF_LEAD_CITY_ID || 0),       // если есть
+  COUNTRY:        Number(process.env.AMO_CF_LEAD_COUNTRY_ID || 0),    // если есть кодовое
 };
 
 // Кастомное поле CONTACT (Telegram) — опционально
@@ -108,6 +109,21 @@ function loadJSON(file, fallback) {
 }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function nowISO() { return new Date().toISOString(); }
+
+// ====== Текст → HTML для Telegram ======
+// 1) снимаем экранирование MarkdownV2 (\- \_ \. \! ...);
+// 2) [text](url) → <a href="url">text</a>;
+// 3) "- " → "• "; переносы оставляем \n (НЕ <br>).
+function stripMdV2Escapes(s) {
+  return String(s || '').replace(/\\([_*\[\]()~`>#+\-=|{}.!\\])/g, '$1');
+}
+function toHtmlForTelegram(s) {
+  let t = stripMdV2Escapes(s);
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
+  t = t.replace(/(^|\n)\s*-\s+/g, '$1• ');
+  return t; // \n остаются как переносы
+}
+
 function parseUTM(startParam) {
   const res = { source: '', medium: '', campaign: '', content: '' };
   if (!startParam) return res;
@@ -224,70 +240,103 @@ const amo = (() => {
   }
   function cfValue(field_id, value) { return { field_id, values: [{ value }] }; }
 
+  // ---- распознаём "плохой" кастом-филд ----
+  function isBadCFError(e) {
+    const s = String(e || '');
+    return s.includes('NotSupportedChoice') && s.includes('custom_fields_values') && s.includes('field_id');
+  }
+
   async function createOrUpdateContact({ phone_e164, name, tg_username }) {
-    // контакт без телефона (если связь через TG)
-    if (!phone_e164) {
-      const body = [{
-        name: name || (tg_username ? `@${tg_username}` : 'Telegram lead'),
-        custom_fields_values: [
-          ...(AMO_CF_CONTACT_TELEGRAM_ID && tg_username ? [cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`)] : [])
-        ]
-      }];
-      const resp = await api('POST', `/api/v4/contacts`, body);
-      return resp._embedded.contacts[0].id;
+    // --- PATCH существующего по телефону ---
+    if (phone_e164) {
+      const q = encodeURIComponent(phone_e164);
+      const data = await api('GET', `/api/v4/contacts?limit=1&query=${q}`);
+      const found = data?._embedded?.contacts?.[0];
+
+      const contactCF = [];
+      if (AMO_CF_CONTACT_TELEGRAM_ID && tg_username) {
+        contactCF.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
+      }
+
+      if (found) {
+        const basePatch = { id: found.id, name: name || found.name || phone_e164 };
+        // Сначала пробуем с кастом-полем
+        try {
+          const body = [ contactCF.length ? { ...basePatch, custom_fields_values: contactCF } : basePatch ];
+          await api('PATCH', `/api/v4/contacts`, body);
+        } catch (e) {
+          if (isBadCFError(e) && contactCF.length) {
+            LOG.warn({ err: String(e) }, 'contact PATCH failed on custom field, retrying without it');
+            await api('PATCH', `/api/v4/contacts`, [ basePatch ]);
+          } else {
+            throw e;
+          }
+        }
+        // Пишем заметку с TG на всякий случай
+        if (tg_username) {
+          try { await addContactNote(found.id, `Telegram: @${tg_username}`); } catch {}
+        }
+        return found.id;
+      }
     }
-    // поиск/обновление по телефону
-    const q = encodeURIComponent(phone_e164);
-    const data = await api('GET', `/api/v4/contacts?limit=1&query=${q}`);
-    const found = data?._embedded?.contacts?.[0];
-    const contactCF = [];
+
+    // --- POST (новый контакт) ---
+    const bodyBase = {
+      name: name || (tg_username ? `@${tg_username}` : (phone_e164 || 'Telegram lead')),
+      custom_fields_values: []
+    };
+    if (phone_e164) bodyBase.custom_fields_values.push({ field_code: 'PHONE', values: [{ value: phone_e164 }] });
     if (AMO_CF_CONTACT_TELEGRAM_ID && tg_username) {
-      contactCF.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
+      bodyBase.custom_fields_values.push(cfValue(AMO_CF_CONTACT_TELEGRAM_ID, `@${tg_username}`));
     }
-    if (found) {
-      const body = [{
-        id: found.id,
-        name: name || found.name || phone_e164,
-        ...(contactCF.length ? { custom_fields_values: contactCF } : {})
-      }];
-      await api('PATCH', `/api/v4/contacts`, body);
-      return found.id;
-    } else {
-      const body = [{
-        name: name || phone_e164,
-        custom_fields_values: [
-          { field_code: 'PHONE', values: [{ value: phone_e164 }] },
-          ...contactCF
-        ]
-      }];
-      const resp = await api('POST', `/api/v4/contacts`, body);
-      return resp._embedded.contacts[0].id;
+
+    // Пробуем создать с кастом-полем; если упадёт — перешлём без него
+    try {
+      const resp = await api('POST', `/api/v4/contacts`, [bodyBase]);
+      const id = resp._embedded.contacts[0].id;
+      if (tg_username) { try { await addContactNote(id, `Telegram: @${tg_username}`); } catch {} }
+      return id;
+    } catch (e) {
+      if (isBadCFError(e) && AMO_CF_CONTACT_TELEGRAM_ID && tg_username) {
+        LOG.warn({ err: String(e) }, 'contact POST failed on custom field, retrying without it');
+        const safeBody = { ...bodyBase, custom_fields_values: bodyBase.custom_fields_values
+          .filter(v => !('field_id' in v)) };
+        const resp2 = await api('POST', `/api/v4/contacts`, [safeBody]);
+        const id2 = resp2._embedded.contacts[0].id;
+        if (tg_username) { try { await addContactNote(id2, `Telegram: @${tg_username}`); } catch {} }
+        return id2;
+      }
+      throw e;
     }
   }
 
+  async function addContactNote(contact_id, text) {
+    const body = [{ note_type: 'common', params: { text } }];
+    await api('POST', `/api/v4/contacts/${contact_id}/notes`, body);
+  }
+
   async function createLeadCalc({ payload, responsible_id }) {
-    const { bm, condition, used_year, used_mileage, city, country, comment, source, consent } = payload;
+    const { bm, condition, used_year, used_mileage, city, country, comment, contact } = payload;
     const pipeline_id = AMO_PIPELINE_IMPORT_ID;
     const status_id = AMO_STATUS_IMPORT_NEW_ID;
 
     const cfs = [];
-    if (CF.DIRECTION) cfs.push(cfValue(CF.DIRECTION, 'calc'));
-    if (CF.COUNTRY && country) cfs.push(cfValue(CF.COUNTRY, country));
+    if (CF.MODEL && bm) cfs.push(cfValue(CF.MODEL, bm));
+    if (CF.CONDITION && condition) cfs.push(cfValue(CF.CONDITION, condition === 'new' ? 'Новый' : 'С пробегом'));
+    if (CF.YEAR && used_year) cfs.push({ field_id: CF.YEAR, values: [{ value: used_year }] });
+    if (CF.MILEAGE_MAX && used_mileage) cfs.push({ field_id: CF.MILEAGE_MAX, values: [{ value: used_mileage }] });
     if (CF.DELIVERY_CITY && city) cfs.push(cfValue(CF.DELIVERY_CITY, city));
     if (CF.CITY && city) cfs.push(cfValue(CF.CITY, city));
-    if (CF.START_PARAM && source?.start_param) cfs.push(cfValue(CF.START_PARAM, source.start_param));
-    if (source?.utm) {
-      if (CF.UTM_SOURCE && source.utm.source) cfs.push(cfValue(CF.UTM_SOURCE, source.utm.source));
-      if (CF.UTM_MEDIUM && source.utm.medium) cfs.push(cfValue(CF.UTM_MEDIUM, source.utm.medium));
-      if (CF.UTM_CAMPAIGN && source.utm.campaign) cfs.push(cfValue(CF.UTM_CAMPAIGN, source.utm.campaign));
-      if (CF.UTM_CONTENT && source.utm.content) cfs.push(cfValue(CF.UTM_CONTENT, source.utm.content));
-    }
-    if (consent && CF.PD_VERSION && CF.PD_TS) {
-      cfs.push(cfValue(CF.PD_VERSION, consent.version || ''));
-      cfs.push(cfValue(CF.PD_TS, consent.ts || ''));
-    }
 
-    const countryTitle = COUNTRIES.find(x => x.code === country)?.title || country || '';
+    const countryTitle = (COUNTRIES.find(x => x.code === country)?.title) || country || '';
+    if (CF.COUNTRY_TITLE && countryTitle) cfs.push(cfValue(CF.COUNTRY_TITLE, countryTitle));
+
+    if (CF.COMMENT_TEXT && (comment || comment === '')) cfs.push(cfValue(CF.COMMENT_TEXT, comment || ''));
+    const methodMap = { phone: 'Телефон', wa: 'WhatsApp', tg: 'Telegram' };
+    if (CF.CONTACT_METHOD && payload.contact_method) cfs.push(cfValue(CF.CONTACT_METHOD, methodMap[payload.contact_method] || payload.contact_method));
+    if (CF.CONTACT_PHONE && contact?.phone_e164) cfs.push(cfValue(CF.CONTACT_PHONE, contact.phone_e164));
+    if (CF.CONTACT_TG && contact?.tg_username) cfs.push(cfValue(CF.CONTACT_TG, '@' + contact.tg_username));
+
     const name = `Кальк • ${bm || 'Авто'} • ${countryTitle} → ${city || ''}`;
 
     const body = [{
@@ -321,7 +370,16 @@ const amo = (() => {
     await api('POST', `/api/v4/leads/${lead_id}/notes`, body);
   }
 
-  return { createOrUpdateContact, createLeadCalc, linkContactToLead, addTask, addNote, accessToken: null, expiresAt: 0 };
+  return {
+    createOrUpdateContact,
+    addContactNote,
+    createLeadCalc,
+    linkContactToLead,
+    addTask,
+    addNote,
+    accessToken: null,
+    expiresAt: 0
+  };
 })();
 
 // ----------------- Telegram бот -----------------
@@ -374,9 +432,7 @@ async function rebaseMaster(ctx, s, text, markup, parse_mode) {
   s.master = { chat_id: m.chat.id, message_id: m.message_id };
   return s.master;
 }
-function homeText() {
-  return MSG_CALC_INTRO; // Markdown-V2 интро
-}
+function homeText() { return MSG_CALC_INTRO; }
 function kbHome() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🚀 Начать', 'cta:start')],
@@ -406,11 +462,8 @@ function chipsCalc(s) {
     const ct = COUNTRIES.find(x => x.code === s.country);
     if (ct) arr.push(mdv2.esc(`Страна: ${ct.flag} ${ct.title}`));
   }
-  if (s.comment === '') {
-    arr.push(mdv2.esc('Комментарий: нет'));
-  } else if (s.comment) {
-    arr.push(mdv2.esc('Комментарий: есть'));
-  }
+  if (s.comment === '') arr.push(mdv2.esc('Комментарий: нет'));
+  else if (s.comment) arr.push(mdv2.esc('Комментарий: есть'));
   if (s.await_text === 'bm') arr.push(mdv2.esc('Введите марку/модель латиницей…'));
   if (s.await_text === 'year') arr.push(mdv2.esc('Введите год выпуска…'));
   if (s.await_text === 'mileage') arr.push(mdv2.esc('Введите ограничение пробега…'));
@@ -451,7 +504,6 @@ function renderCalcPage(s) {
     rows = [
       [Markup.button.callback('Москва', 'calc:city:msk'), Markup.button.callback('Санкт-Петербург', 'calc:city:spb')],
       [Markup.button.callback('Указать свой', 'calc:city:oth')],
-      // Убрали кнопку "Вперёд →"
       [Markup.button.callback('↩ Назад', 'calc:back')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
@@ -462,7 +514,6 @@ function renderCalcPage(s) {
     rows = [
       COUNTRIES.slice(0,3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
       COUNTRIES.slice(3).map(c => Markup.button.callback(`${c.flag} ${c.title}`, `calc:country:${c.code}`)),
-      // Убрали кнопку "Вперёд →" — переход на Шаг 5 будет по клику на страну
       [Markup.button.callback('↩ Назад', 'calc:back')]
     ];
     return { text, markup: Markup.inlineKeyboard(rows), parse_mode: 'MarkdownV2' };
@@ -611,7 +662,7 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     if (a === 'used') {
       s.await_text = 'year';
       await ctx.reply(mdv2.esc('Введите год выпуска (например: 2019).'), { parse_mode: 'MarkdownV2' });
-      return; // ждём ввод
+      return;
     } else {
       s.used_year = null;
       s.used_mileage = null;
@@ -625,12 +676,11 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     else if (a === 'oth') {
       s.await_text = 'city_custom';
       await ctx.reply(mdv2.esc('Введите город доставки (только буквы, пробелы и дефисы).'), { parse_mode: 'MarkdownV2' });
-      return; // ждём ввод
+      return;
     }
   }
 
   if (type === 'country') {
-    // Автовыбор страны на Шаге 4 сразу переносит на Шаг 5
     s.country = a; // EU/KR/CN/US/AE
     s.step = 5;
   }
@@ -639,20 +689,15 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     if (a === 'add') {
       s.await_text = 'comment';
       await ctx.reply(mdv2.esc('Введите комментарий одним сообщением.'), { parse_mode: 'MarkdownV2' });
-      return; // ждём ввод
+      return;
     }
     if (a === 'none') {
-      // Выбран вариант без комментариев → показать Шаг 6 отдельным сообщением и сразу перейти к Шагу 7
-      s.comment = '';      // пустая строка => «Комментарий: нет»
+      s.comment = '';
       s.await_text = null;
-
-      // Сообщение с расчётом (Шаг 6 как отдельный пост)
       await ctx.reply(
         mdv2.esc('📦 Ориентировочная стоимость и сроки') + '\n\n' + renderCostBlock(s),
         { parse_mode: 'MarkdownV2' }
       );
-
-      // Переход на Шаг 7 и рендер меню
       s.step = 7;
       const view = renderCalcPage(s);
       await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
@@ -660,15 +705,13 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
     }
   }
 
-  if (type === 'to_contact') {
-    s.step = 7;
-  }
+  if (type === 'to_contact') s.step = 7;
 
   if (type === 'cm') {
     s.contact_method = a; // phone | tg | wa
     if (a === 'phone' || a === 'wa') {
       await askContact(ctx, s);
-      return; // ждём контакт
+      return;
     }
     if (a === 'tg') {
       if (ctx.from.username) {
@@ -678,13 +721,12 @@ bot.action(/^calc:(.+)$/, async (ctx) => {
       } else {
         s.await_text = 'tg_username';
         await ctx.reply(mdv2.esc('Укажите ваш Telegram @username (например: @ivan_ivanov).'), { parse_mode: 'MarkdownV2' });
-        return; // ждём ввод
+        return;
       }
     }
   }
 
   if (type === 'back') {
-    // Спец-правило: с Этапа 7 «Назад» переносит сразу на Этап 5
     if (s.step === 7) s.step = 5;
     else if (s.step > 1) s.step = s.step - 1;
   }
@@ -707,7 +749,7 @@ bot.on('text', async (ctx) => {
     if (!validateBrandModel(t)) {
       await ctx.reply(mdv2.esc('Неверный формат. Введите марку и модель латиницей (пример: BMW X5).'),
         { parse_mode: 'MarkdownV2' });
-      return; // меню не показываем
+      return;
     }
     s.bm = t.toUpperCase();
     s.await_text = null;
@@ -721,7 +763,7 @@ bot.on('text', async (ctx) => {
     s.used_year = y;
     s.await_text = 'mileage';
     await ctx.reply(mdv2.esc('Введите ограничение пробега (например: «до 50 000 км»).'), { parse_mode: 'MarkdownV2' });
-    return; // ждём пробег, меню не показываем
+    return;
   } else if (s.await_text === 'mileage') {
     const m = parseMileage(t);
     if (!m) {
@@ -743,7 +785,6 @@ bot.on('text', async (ctx) => {
     s.await_text = null;
     s.step = 4;
   } else if (s.await_text === 'comment') {
-    // Введён комментарий → показать Шаг 6 отдельным сообщением и перейти к Шагу 7
     s.comment = t.slice(0, 800);
     s.await_text = null;
 
@@ -759,7 +800,7 @@ bot.on('text', async (ctx) => {
   } else if (s.await_text === 'tg_username') {
     const u = t.replace(/^@/, '');
     if (!/^[A-Za-z0-9_]{5,}$/.test(u)) {
-      await ctx.reply(mdv2.esc('Неверный @username. Пример: @ivan_ivanов'), { parse_mode: 'MarkdownV2' });
+      await ctx.reply(mdv2.esc('Неверный @username. Пример: @ivan_ivanov'), { parse_mode: 'MarkdownV2' });
       return;
     }
     s.tg_username = u;
@@ -768,7 +809,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // после валидного ввода — переносим меню вниз
   const view = renderCalcPage(s);
   await rebaseMaster(ctx, s, view.text, view.markup, view.parse_mode);
 });
@@ -805,6 +845,7 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     queueAmoDelivery({ payload, responsible_id });
 
     const lines = MSG_THANKS_SERVICES;
+    const html  = toHtmlForTelegram(lines);
 
     const kb = Markup.inlineKeyboard([
       [Markup.button.url('Подписаться на AUTONEWS', NEWS_CHANNEL_URL)],
@@ -814,16 +855,20 @@ async function finalizeAndSend(ctx, s, { sendNew = false } = {}) {
     ]);
 
     if (sendNew) {
-      await ctx.reply(lines, { ...kb, parse_mode: 'MarkdownV2', disable_web_page_preview: false });
+      await ctx.reply(html, { ...kb, parse_mode: 'HTML', disable_web_page_preview: false });
     } else {
       const m = await ensureMasterMessage(ctx, s);
-      await safeEdit(ctx, m, lines, { ...kb }, 'MarkdownV2');
+      await safeEdit(ctx, m, html, { ...kb }, 'HTML');
     }
 
     resetCalcState(s);
   } catch (e) {
     LOG.error(e, 'finalize error');
-    await notifyAndRebaseHome(ctx, s, 'Не получилось отправить заявку сразу. Мы повторим попытку автоматически.');
+    await notifyAndRebaseHome(
+      ctx,
+      s,
+      '⚠️ Не удалось отправить подтверждение в Telegram, но заявка поставлена в очередь на отправку в amoCRM. Повторим попытку.'
+    );
   }
 }
 
@@ -868,7 +913,8 @@ async function processOutboxTick() {
     if (job.next_at > now) continue;
     try {
       if (job.t === 'amo.calc') {
-        await deliverCalcToAmo(job.payload, job.responsible_id);
+        const res = await deliverCalcToAmo(job.payload, job.responsible_id);
+        LOG.info({ res }, 'amoCRM lead created');
       }
       const idx = outbox.findIndex(x => x.id === job.id);
       if (idx >= 0) outbox.splice(idx, 1);
@@ -878,6 +924,7 @@ async function processOutboxTick() {
       const backoffMs = attemptBackoff(job.attempts);
       job.next_at = Date.now() + backoffMs;
       saveJSON(OUTBOX_PATH, outbox);
+      LOG.warn({ err: String(e), attempts: job.attempts, backoffMs }, 'amoCRM delivery error, will retry');
       if (job.attempts === 3 && ADMIN_CHAT_ID) {
         try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, `⚠️ amoCRM недоступна, повторная попытка через ${Math.round(backoffMs/1000)}с`); } catch {}
       }
@@ -902,11 +949,12 @@ async function deliverCalcToAmo(payload, responsible_id) {
   const lead_id = await amo.createLeadCalc({ payload, responsible_id });
 
   await amo.linkContactToLead(contact_id, lead_id);
-
   await amo.addNote(lead_id, calcSummary(payload));
 
   const completeAt = Date.now() + 15 * 60 * 1000;
   await amo.addTask(lead_id, 'Перезвонить/написать клиенту по калькулятору', completeAt);
+
+  return { contact_id, lead_id };
 }
 
 function calcSummary(p) {
