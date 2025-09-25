@@ -199,11 +199,24 @@ function capitalizeWords(s) {
 }
 
 // --- Валидации ---
-function validateBrandModel(t) {
-  const s = String(t || '').trim();
-  if (s.length < 2 || s.length > 40) return false;
-  return /^[A-Za-z0-9][A-Za-z0-9\s\-]+$/.test(s);
+
+function normalizeBrandModelInput(t) {
+  return String(t || '')
+    .trim()
+    .replace(/[,_]+/g, ' ')
+    .replace(/[–—]+/g, '-')
+    .replace(/\s{2,}/g, ' ');
 }
+function validateBrandModel(t) {
+  const s = normalizeBrandModelInput(t);
+  if (s.length < 2 || s.length > 60) return false;
+  const words = s.split(' ').filter(Boolean);
+  if (words.length < 2) return false;
+  if (!/[\p{L}]/u.test(s)) return false;
+  const ok = /^[\p{L}\p{N}][\p{L}\p{N}\s\-\/&+\.]*$/u.test(s);
+  return ok;
+}
+
 function cleanCityInput(t) {
   return String(t || '')
     .trim()
@@ -565,7 +578,7 @@ function chipsCalc(s) {
   }
   if (s.comment === '') arr.push(mdv2.esc('Комментарий: нет'));
   else if (s.comment) arr.push(mdv2.esc('Комментарий: есть'));
-  if (s.await_text === 'bm') arr.push(mdv2.esc('Введите марку/модель латиницей…'));
+  if (s.await_text === 'bm') arr.push(mdv2.esc('Введите марку/модель (рус/лат), без запятых…'));
   if (s.await_text === 'year') arr.push(mdv2.esc('Введите год выпуска…'));
   if (s.await_text === 'mileage') arr.push(mdv2.esc('Введите ограничение пробега…'));
   if (s.await_text === 'city_custom') arr.push(mdv2.esc('Введите город доставки…'));
@@ -860,12 +873,15 @@ bot.on('text', async (ctx) => {
   const t = ctx.message.text.trim();
 
   if (s.await_text === 'bm') {
-    if (!validateBrandModel(t)) {
-      await ctx.reply(mdv2.esc('Неверный формат. Введите марку и модель латиницей (пример: BMW X5).'),
-        { parse_mode: 'MarkdownV2' });
+    const norm = normalizeBrandModelInput(t);
+    if (!validateBrandModel(norm)) {
+      await ctx.reply(
+        mdv2.esc('Неверный формат. Напишите марку и модель без запятых (например: BMW X5 или Тойота Камри).'),
+        { parse_mode: 'MarkdownV2' }
+      );
       return;
     }
-    s.bm = t.toUpperCase();
+    s.bm = norm.toUpperCase();
     s.await_text = null;
     s.step = 2;
   } else if (s.await_text === 'year') {
